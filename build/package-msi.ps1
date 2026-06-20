@@ -35,7 +35,7 @@ function Resolve-Wix {
     return $dotnetTool
   }
 
-  throw "WiX Toolset CLI was not found. Install it with: dotnet tool install --global wix"
+  throw "WiX Toolset CLI was not found. Install it with: dotnet tool install --global wix --version 6.*"
 }
 
 Push-Location $root
