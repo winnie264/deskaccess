@@ -2,7 +2,10 @@
 
 package tray
 
-import "context"
+import (
+	"context"
+	"os/exec"
+)
 
 // HasDisplay is intentionally false on Raspberry Pi/Linux ARM builds so the
 // main binary runs as a headless daemon and does not link GTK/appindicator tray
@@ -21,6 +24,11 @@ func (t *Tray) Run() {
 	<-t.ctx.Done()
 }
 
-func openBrowser(string) {}
+func openBrowser(url string) {
+	if url == "" {
+		return
+	}
+	_ = exec.Command("xdg-open", url).Start()
+}
 
 func copyToClipboard(string) {}
