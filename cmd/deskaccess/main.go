@@ -115,6 +115,8 @@ func main() {
 			}
 			// Tray process: IPC client only — requires the daemon to be running.
 			runTray()
+		} else if tray.HasDesktopDisplay() && openDashboardFromService() {
+			return
 		} else {
 			// Headless machine: run the full daemon directly (no tray, no service manager).
 			runDaemon()
@@ -173,6 +175,15 @@ func generateInvite(protocol string, port int, label string) {
 }
 
 func activateExistingInstance() bool {
+	st, err := ipc.Query(ipc.Request{Cmd: "status"})
+	if err != nil || st == nil || st.WebuiURL == "" {
+		return false
+	}
+	tray.ShowDashboard(st.WebuiURL)
+	return true
+}
+
+func openDashboardFromService() bool {
 	st, err := ipc.Query(ipc.Request{Cmd: "status"})
 	if err != nil || st == nil || st.WebuiURL == "" {
 		return false
