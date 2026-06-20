@@ -32,7 +32,7 @@ func openDashboard(url string) {
 			dashOpen = false
 			dashMu.Unlock()
 		}()
-		showDashboard(url)
+		showDashboard(url, true)
 	}()
 }
 
@@ -43,5 +43,5 @@ func ShowDashboard(url string) {
 	if FocusDashboardWindow() {
 		return
 	}
-	showDashboard(url)
+	showDashboard(url, false)
 }

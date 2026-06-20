@@ -20,14 +20,25 @@ var (
 	procShowWindow          = user32.NewProc("ShowWindow")
 	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
 	procSendMessageW        = user32.NewProc("SendMessageW")
+	procSetWindowLongPtrW   = user32.NewProc("SetWindowLongPtrW")
+	procCallWindowProcW     = user32.NewProc("CallWindowProcW")
 	procExtractIconExW      = shell32.NewProc("ExtractIconExW")
 )
 
 const (
 	wmSetIcon  = 0x0080
+	wmClose    = 0x0010
+	wmDestroy  = 0x0002
 	iconSmall  = 0
 	iconBig    = 1
 	iconSmall2 = 2
+	swHide     = 0
+)
+
+var (
+	gwlWndProc               = ^uintptr(3) // GWL_WNDPROC is -4.
+	dashboardWndProcCallback = syscall.NewCallback(dashboardWndProc)
+	dashboardWindowProcs     = make(map[uintptr]uintptr)
 )
 
 // showDashboard opens the UI in an embedded WebView2 window.
@@ -38,7 +49,7 @@ const (
 // on the same OS thread for the full lifetime of the window. Without it the
 // Windows message pump drops events under scheduler pressure (DHT goroutines,
 // etc.) and the window appears to hang.
-func showDashboard(url string) {
+func showDashboard(url string, closeToTray bool) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -55,9 +66,38 @@ func showDashboard(url string) {
 	w.SetTitle("DeskAccess")
 	w.SetSize(1200, 820, webview2.HintNone)
 	setWindowIcon(w.Window())
+	if closeToTray {
+		installCloseToTrayHandler(w.Window())
+	}
 	maximizeWindow(w.Window())
 	w.Navigate(url)
 	w.Run()
+}
+
+func installCloseToTrayHandler(hwnd unsafe.Pointer) {
+	if hwnd == nil {
+		return
+	}
+	hwndPtr := uintptr(hwnd)
+	old, _, _ := procSetWindowLongPtrW.Call(hwndPtr, gwlWndProc, dashboardWndProcCallback)
+	if old != 0 {
+		dashboardWindowProcs[hwndPtr] = old
+	}
+}
+
+func dashboardWndProc(hwnd uintptr, msg uint32, wparam uintptr, lparam uintptr) uintptr {
+	switch msg {
+	case wmClose:
+		procShowWindow.Call(hwnd, swHide)
+		return 0
+	case wmDestroy:
+		delete(dashboardWindowProcs, hwnd)
+	}
+	if old := dashboardWindowProcs[hwnd]; old != 0 {
+		ret, _, _ := procCallWindowProcW.Call(old, hwnd, uintptr(msg), wparam, lparam)
+		return ret
+	}
+	return 0
 }
 
 func setWindowIcon(hwnd unsafe.Pointer) {
