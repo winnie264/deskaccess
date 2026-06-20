@@ -22,7 +22,7 @@
     </StandardDirectory>
 
     <StandardDirectory Id="ProgramMenuFolder">
-      <Directory Id="StartMenuFolder" Name="DeskAccess" />
+      <Directory Id="DeskAccessStartMenuFolder" Name="DeskAccess" />
     </StandardDirectory>
 
     <DirectoryRef Id="INSTALLFOLDER">
@@ -63,13 +63,14 @@
       </Component>
     </DirectoryRef>
 
-    <DirectoryRef Id="StartMenuFolder">
+    <DirectoryRef Id="DeskAccessStartMenuFolder">
       <Component Id="StartMenuShortcut" Guid="{456F4955-EEAF-444F-8569-B5E67C9CE9F0}">
         <Shortcut
           Id="DeskAccessShortcut"
           Name="DeskAccess"
           Description="Open DeskAccess"
           Target="[INSTALLFOLDER]DeskAccess.exe"
+          Icon="DeskAccessIcon"
           WorkingDirectory="INSTALLFOLDER" />
         <RemoveFolder Id="RemoveStartMenuFolder" On="uninstall" />
         <RegistryValue

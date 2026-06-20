@@ -35,7 +35,27 @@ function Resolve-Wix {
     return $dotnetTool
   }
 
+  $programFiles = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
+  foreach ($base in $programFiles) {
+    $matches = Get-ChildItem -Path $base -Recurse -Filter wix.exe -ErrorAction SilentlyContinue |
+      Where-Object { $_.FullName -match "WiX Toolset" } |
+      Sort-Object FullName -Descending
+    if ($matches) {
+      return $matches[0].FullName
+    }
+  }
+
   throw "WiX Toolset CLI was not found. Install it with: dotnet tool install --global wix --version 6.*"
+}
+
+function Get-WixMajorVersion {
+  param([string]$WixPath)
+
+  $versionText = & $WixPath --version
+  if ($versionText -match "^(\d+)\.") {
+    return [int]$Matches[1]
+  }
+  return 0
 }
 
 Push-Location $root
@@ -62,13 +82,17 @@ try {
   Copy-Item -Force (Join-Path $root "resources\deskview.ico") (Join-Path $stage "DeskAccess.ico")
 
   Write-Host "==> Building MSI"
-  Invoke-Checked $wix @(
+  $wixArgs = @(
     "build",
     $wxs,
     "-d", "Version=$Version",
     "-d", "SourceDir=$stage",
     "-o", $msi
   )
+  if ((Get-WixMajorVersion $wix) -ge 7) {
+    $wixArgs = @("build", "-acceptEula", "wix7") + $wixArgs[1..($wixArgs.Length - 1)]
+  }
+  Invoke-Checked $wix $wixArgs
 
   Get-ChildItem $packages -File | Get-FileHash -Algorithm SHA256 |
     ForEach-Object { "$($_.Hash)  $([IO.Path]::GetFileName($_.Path))" } |
