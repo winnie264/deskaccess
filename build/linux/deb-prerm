@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop deskaccess.service || true
+    systemctl disable deskaccess.service || true
+  fi
+fi
+
+exit 0

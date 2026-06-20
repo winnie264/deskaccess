@@ -1,0 +1,67 @@
+# Build outputs and packaged artifacts
+dist/
+build/*.exe
+build/*.dll
+build/*.so
+build/*.dylib
+build/*.apk
+build/*.appx
+build/*.msi
+build/*.deb
+build/*.rpm
+build/*.tar
+build/*.tar.gz
+build/*.zip
+build/*-arm*
+build/*linux-*
+build/deskaccess-*
+build/rdpanywhere-*
+build/DeskAccess.exe
+build/*.exe~
+cmd/deskaccess/__debug_bin*
+
+# Go build and test artifacts
+.cache/
+.gocache/
+.gocache*/
+go-build*/
+*.test
+*.out
+coverage.*
+*.prof
+
+# Android/Gradle outputs
+android/.gradle/
+android/**/build/
+android/local.properties
+*.apk
+*.aab
+
+# Local config, identities, and secrets
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.csr
+tpm_identity.json
+config.toml
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*.pid
+
+# IDE/editor
+.vscode/
+.idea/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini

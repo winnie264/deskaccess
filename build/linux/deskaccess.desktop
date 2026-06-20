@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=DeskAccess
+Comment=Open DeskAccess
+Exec=deskaccess %u
+Icon=deskaccess
+Terminal=false
+Categories=Network;RemoteAccess;
+MimeType=x-scheme-handler/deskaccess;

@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sort -t: -k1,1)",
+      "Bash(cd \"/c/code/rdp anywhere\" && grep -n \"fmt\\\\.Printf\\\\|fmt\\\\.Println\" internal/pairing/pairing.go internal/tunnel/tunnel.go internal/presence/presence.go internal/license/license.go 2>/dev/null)",
+      "Bash(cd \"/c/code/rdp anywhere\" && grep -c \"fmt\\\\.Printf\" internal/pairing/pairing.go internal/tunnel/tunnel.go internal/presence/presence.go 2>/dev/null)",
+      "Bash(sed -i 's/fmt\\\\.Printf\\(\"resolve: connected to %s via %s\\\\\\\\n\", hostPeerID\\\\[:12\\\\], r\\\\.c\\\\.source\\)/log.Info\\(\"peer resolved\", \"peer\", hostPeerID[:12], \"source\", r.c.source\\)/g' internal/node/resolve.go)",
+      "Bash(sed -i 's/fmt\\\\.Printf\\(\"resolve: %s failed for %s: %v\\\\\\\\n\", r\\\\.c\\\\.source, hostPeerID\\\\[:12\\\\], r\\\\.err\\)/log.Debug\\(\"resolve attempt failed\", \"source\", r.c.source, \"peer\", hostPeerID[:12], \"err\", r.err\\)/g' internal/node/resolve.go)",
+      "Bash(sed -i 's/fmt\\\\.Printf\\(\"RDP Anywhere running. NodeID: %s\\\\\\\\n\", n\\\\.NodeID\\(\\)\\)/slog.Info\\(\"service running\", \"peer_id\", n.NodeID\\(\\)\\)/g' internal/service/service.go)",
+      "Bash(go env *)",
+      "Bash(grep -rn \"\\\\\"control\\\\\"\\\\|control\\\\.DisconnectReason\" \"$\\(go env GOPATH\\)/pkg/mod/github.com/libp2p/go-libp2p@v0.35.0/options_filter.go\")",
+      "Bash(head -15 \"$\\(go env GOPATH\\)/pkg/mod/github.com/libp2p/go-libp2p@v0.35.0/options_filter.go\")",
+      "Bash(go build *)",
+      "Bash(go test *)"
+    ]
+  }
+}

@@ -1,0 +1,100 @@
+name: Raspberry Pi Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version"
+        required: false
+        default: "0.1.0"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  raspberry-pi:
+    name: Raspberry Pi packages
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-arm64
+            artifact: deskaccess-raspberry-pi-arm64
+            deb_arch: arm64
+          - target: linux-armv7
+            artifact: deskaccess-raspberry-pi-armv7
+            deb_arch: armhf
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            version="${{ inputs.version }}"
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.1.0"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build Raspberry Pi package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          bash build/package-linux.sh "${{ steps.version.outputs.version }}"
+
+      - name: Upload Raspberry Pi package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/packages/deskaccess-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz
+            dist/packages/deskaccess_${{ steps.version.outputs.version }}_${{ matrix.deb_arch }}.deb
+            dist/packages/SHA256SUMS.txt
+          if-no-files-found: error
+
+  release:
+    name: Publish Raspberry Pi release assets
+    if: github.ref_type == 'tag'
+    needs: [raspberry-pi]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Flatten assets
+        shell: bash
+        run: |
+          mkdir -p upload
+          find release-assets -type f \( -name "*.tar.gz" -o -name "*.deb" \) -exec cp {} upload/ \;
+          find release-assets -type f -name "SHA256SUMS.txt" -print0 |
+            while IFS= read -r -d '' file; do
+              dir="$(basename "$(dirname "$file")")"
+              cp "$file" "upload/SHA256SUMS-${dir}.txt"
+            done
+          ls -lh upload
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: upload/*

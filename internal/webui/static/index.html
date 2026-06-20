@@ -1,0 +1,1851 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeskAccess</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #f6f8fb; color: #111827; min-height: 100vh; padding-bottom: 48px; }
+
+  header { background: #ffffff; padding: 14px 24px; border-bottom: 1px solid #e5e7eb;
+           display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 17px; font-weight: 600; color: #111827; }
+  .badge { background: #2563eb; color: #fff; font-size: 11px; padding: 2px 8px;
+           border-radius: 4px; font-weight: 500; }
+
+  /* ── Tab bar ─────────────────────────────────────────────────────────────── */
+  .tab-bar { display: flex; background: #ffffff; border-bottom: 1px solid #e5e7eb;
+             padding: 0 24px; gap: 0; }
+  .tab-btn { background: none; border: none; color: #6b7280; cursor: pointer;
+             padding: 12px 18px; font-size: 13px; font-weight: 500;
+             border-bottom: 2px solid transparent; margin-bottom: -1px;
+             transition: color .15s, border-color .15s; }
+  .tab-btn:hover { color: #111827; }
+  .tab-btn.active { color: #2563eb; border-bottom-color: #2563eb; }
+
+  /* ── Tab panes ───────────────────────────────────────────────────────────── */
+  .tab-pane { display: none; padding: 24px; max-width: 860px; margin: 0 auto; }
+  .tab-pane.active { display: block; }
+
+  .section { margin-bottom: 28px; }
+  .section h2 { font-size: 12px; font-weight: 600; color: #6b7280;
+                text-transform: uppercase; letter-spacing: .06em; margin-bottom: 12px; }
+  .section-title-row { display: flex; align-items: center; justify-content: space-between;
+                       gap: 12px; margin-bottom: 12px; }
+  .section-title-row h2 { margin-bottom: 0; }
+
+  .card { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 18px;
+          box-shadow: 0 1px 2px #0000000a; }
+
+  .btn { padding: 10px 20px; border-radius: 8px; border: none; cursor: pointer;
+         font-size: 14px; font-weight: 500; transition: opacity .15s; }
+  .btn:hover { opacity: .85; }
+  .btn:disabled { opacity: .4; cursor: default; }
+  .btn-primary   { background: #2563eb; color: #fff; }
+  .btn-secondary { background: #ffffff; color: #334155; border: 1px solid #cbd5e1; }
+  .btn-danger    { background: #dc2626; color: #fff; }
+  .btn-sm        { padding: 6px 12px; font-size: 12px; }
+
+  /* ── Connect box ─────────────────────────────────────────────────────────── */
+  .connect-box p { font-size: 13px; color: #6b7280; margin-bottom: 14px; }
+  .url-row { display: flex; gap: 8px; }
+  .url-row input { flex: 1; background: #ffffff; border: 1px solid #cbd5e1;
+                   color: #111827; padding: 11px 14px; border-radius: 8px;
+                   font-size: 13px; font-family: monospace; outline: none; }
+  .url-row input:focus { border-color: #2563eb; }
+  .url-row input::placeholder { color: #94a3b8; }
+
+  /* ── Generate buttons ────────────────────────────────────────────────────── */
+  .gen-row { display: flex; gap: 10px; flex-wrap: wrap; }
+
+  /* ── Remote list ─────────────────────────────────────────────────────────── */
+  .remote-list { display: flex; flex-direction: column; gap: 8px; }
+  .remote-card { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 10px;
+                 padding: 14px 18px; display: flex; align-items: center; gap: 14px; }
+  .remote-card:hover { border-color: #cbd5e1; box-shadow: 0 1px 2px #0000000a; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; margin-top: 2px; }
+  .dot.online  { background: #22c55e; box-shadow: 0 0 5px #22c55e88; }
+  .dot.offline { background: #cbd5e1; }
+  .remote-info { flex: 1; min-width: 0; }
+
+  .remote-name { display: flex; align-items: center; gap: 6px; }
+  .remote-name-text { font-size: 15px; font-weight: 500; }
+  .remote-name-input { display: none; font-size: 15px; font-weight: 500;
+                       background: #ffffff; border: 1px solid #2563eb; color: #111827;
+                       border-radius: 5px; padding: 2px 8px; outline: none; width: 200px; }
+  .rename-btn { background: none; border: none; cursor: pointer; color: #4b5563;
+                font-size: 13px; padding: 2px 4px; border-radius: 4px; }
+  .rename-btn:hover { color: #2563eb; background: #eff6ff; }
+
+  .remote-status { font-size: 12px; color: #6b7280; margin-top: 3px; }
+  .remote-btns  { display: flex; gap: 8px; flex-shrink: 0; }
+
+  /* ── Link modal ──────────────────────────────────────────────────────────── */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: #0f172a66;
+                   z-index: 50; align-items: center; justify-content: center; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 14px;
+           padding: 28px; width: 520px; max-width: 92vw; }
+  .modal h3 { font-size: 16px; font-weight: 600; margin-bottom: 20px; }
+
+  .url-display { background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px;
+                 padding: 14px; font-family: monospace; font-size: 13px;
+                 word-break: break-all; color: #2563eb; line-height: 1.6;
+                 cursor: pointer; user-select: all; }
+  .url-display:hover { border-color: #2563eb; }
+
+  .expiry-bar { height: 3px; background: #e2e8f0; border-radius: 2px;
+                margin: 12px 0 4px; overflow: hidden; }
+  .expiry-fill { height: 100%; background: #2563eb; border-radius: 2px;
+                 transition: width 1s linear; }
+  .expiry-text { font-size: 11px; color: #6b7280; }
+
+  .modal-note { font-size: 12px; color: #6b7280; margin: 14px 0 20px; line-height: 1.5; }
+  .modal-footer { display: flex; gap: 10px; justify-content: flex-end; }
+
+  /* ── Invite cards ────────────────────────────────────────────────────────── */
+  .invite-card { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 9px;
+                 padding: 12px 16px; display: flex; align-items: center; gap: 12px;
+                 margin-bottom: 6px; }
+  .invite-card.used     { opacity: .55; }
+  .invite-card.revoked  { opacity: .4; }
+  .invite-card.expired  { opacity: .4; }
+  .invite-badge { font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 20px;
+                  text-transform: uppercase; letter-spacing: .04em; flex-shrink: 0; }
+  .badge-onetime { background: #dbeafe; color: #1d4ed8; }
+  .badge-pairing { background: #dcfce7; color: #15803d; }
+  .invite-info   { flex: 1; min-width: 0; }
+  .invite-label  { font-size: 14px; font-weight: 500; }
+  .invite-meta   { font-size: 12px; color: #6b7280; margin-top: 2px; }
+  .status-dot    { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+                   margin-right: 5px; }
+  .status-pending { background: #22c55e; }
+  .status-used    { background: #3b82f6; }
+  .status-expired, .status-revoked { background: #4b5563; }
+
+  /* ── RDP setup steps ─────────────────────────────────────────────────────── */
+  .setup-step { display:flex; gap:12px; align-items:flex-start;
+                padding:10px 0; border-bottom:1px solid #e5e7eb; }
+  .setup-step:last-child { border-bottom:none; }
+  .step-num { width:24px; height:24px; border-radius:50%; background:#1d4ed8;
+              color:#fff; font-size:12px; font-weight:700; display:flex;
+              align-items:center; justify-content:center; flex-shrink:0; margin-top:1px; }
+  .step-body { flex:1; }
+  .step-title { font-size:14px; font-weight:500; margin-bottom:3px; }
+  .step-cmd { background:#f8fafc; border:1px solid #cbd5e1; border-radius:6px;
+              padding:7px 10px; font-family:monospace; font-size:12px; color:#2563eb;
+              margin-top:6px; cursor:pointer; display:flex; justify-content:space-between;
+              align-items:center; }
+  .step-cmd:hover { border-color:#2563eb; }
+  .step-note { font-size:12px; color:#6b7280; margin-top:4px; }
+
+  /* ── Duration / proto pills ──────────────────────────────────────────────── */
+  .duration-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pill { background: #ffffff; border: 1px solid #cbd5e1; color: #64748b;
+          border-radius: 20px; padding: 5px 14px; font-size: 13px; cursor: pointer;
+          transition: all .15s; }
+  .pill:hover  { border-color: #3b82f6; color: #1d4ed8; }
+  .pill.active { background: #1d4ed8; border-color: #3b82f6; color: #fff; font-weight: 500; }
+
+  /* ── Settings ────────────────────────────────────────────────────────────── */
+  .field-label { font-size: 12px; color: #6b7280; display: block; margin-bottom: 6px; }
+  .field-input { width: 100%; background: #ffffff; border: 1px solid #cbd5e1;
+                 color: #111827; padding: 9px 12px; border-radius: 7px; font-size: 13px;
+                 outline: none; }
+  .field-input:focus { border-color: #2563eb; }
+  .field-select { width: 100%; background-color: #ffffff; border: 1px solid #cbd5e1;
+                  color: #111827; padding: 9px 34px 9px 12px; border-radius: 7px; font-size: 13px;
+                  outline: none; cursor: pointer;
+                  background-image:
+                    linear-gradient(45deg, transparent 50%, #64748b 50%),
+                    linear-gradient(135deg, #64748b 50%, transparent 50%);
+                  background-position:
+                    calc(100% - 18px) 50%,
+                    calc(100% - 12px) 50%;
+                  background-size: 6px 6px, 6px 6px;
+                  background-repeat: no-repeat; }
+  .field-select:focus { border-color: #2563eb; }
+  .field-textarea { width: 100%; background: #ffffff; border: 1px solid #cbd5e1;
+                    color: #111827; padding: 9px 12px; border-radius: 7px; font-size: 12px;
+                    font-family: monospace; outline: none; resize: vertical; min-height: 80px;
+                    line-height: 1.6; }
+  .field-textarea:focus { border-color: #2563eb; }
+  .field-row { margin-bottom: 14px; }
+  .path-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .path-value { flex:1; min-width:220px; background:#f8fafc; border:1px solid #cbd5e1;
+                color:#334155; padding:8px 10px; border-radius:6px; font-size:12px;
+                font-family:monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+                user-select:text; }
+  .restart-note { display: none; background: #ecfdf5; border: 1px solid #86efac;
+                  color: #166534; font-size: 12px; padding: 8px 12px; border-radius: 6px;
+                  margin-top: 10px; }
+  .restart-note.show { display: block; }
+
+  .empty { color: #94a3b8; font-size: 13px; text-align: center; padding: 28px 0; }
+
+  .network-status-bar { position: fixed; left: 0; right: 0; bottom: 0; min-height: 42px;
+                        background: #ffffff; border-top: 1px solid #e5e7eb;
+                        display: flex; align-items: center; gap: 10px; padding: 8px 24px;
+                        z-index: 40; color: #334155; font-size: 12px; box-shadow: 0 -1px 2px #0000000a; }
+  .network-status-bar.ok { border-top-color: #166534; }
+  .network-status-bar.warn { border-top-color: #854d0e; }
+  .network-status-bar.bad { border-top-color: #7f1d1d; }
+  .network-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #cbd5e1; flex-shrink: 0; }
+  .network-status-bar.ok .network-status-dot { background: #22c55e; box-shadow: 0 0 5px #22c55e88; }
+  .network-status-bar.warn .network-status-dot { background: #f59e0b; }
+  .network-status-bar.bad .network-status-dot { background: #ef4444; }
+  .network-status-main { font-weight: 600; color: #111827; white-space: nowrap; }
+  .network-status-detail { color: #64748b; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .toast { position: fixed; bottom: 58px; right: 24px; background: #ffffff;
+           border: 1px solid #cbd5e1; border-radius: 8px; padding: 11px 16px;
+           font-size: 13px; opacity: 0; transition: opacity .25s;
+           pointer-events: none; z-index: 100; box-shadow: 0 8px 24px #0f172a24; }
+  .toast.show { opacity: 1; }
+  .toast.err  { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>DeskAccess</h1>
+  <span class="badge" id="label-badge" title="Click to rename" style="cursor:pointer"
+        onclick="renameThisMachine()">…</span>
+  <span id="identity-badge" style="display:none;font-size:11px;background:#f1f5f9;
+        color:#334155;padding:2px 8px;border-radius:4px;margin-left:4px;"></span>
+</header>
+
+<nav class="tab-bar">
+  <button class="tab-btn active" onclick="switchTab('connect')">Connect</button>
+  <button class="tab-btn"        onclick="switchTab('share')">Share</button>
+  <button class="tab-btn"        onclick="switchTab('allowed')">Allowed</button>
+  <button class="tab-btn"        onclick="switchTab('settings')">Settings</button>
+</nav>
+
+<!-- ═══════════════════════════ TAB: CONNECT ════════════════════════════════ -->
+<div id="tab-connect" class="tab-pane active">
+
+  <!-- Paired machines -->
+  <div class="section">
+    <div class="section-title-row">
+      <h2>Paired machines <span id="online-badge" style="color:#22c55e;font-size:11px;"></span></h2>
+    </div>
+    <div class="remote-list" id="remote-list">
+      <div class="empty">No paired machines yet.<br>Use a Pairing Link on the Share tab to add one.</div>
+    </div>
+  </div>
+
+  <!-- Connect via URL -->
+  <div class="section">
+    <h2>Connect via link</h2>
+    <div class="card connect-box">
+      <p>Paste the <code>deskaccess://</code> link shared by the host.</p>
+      <div class="url-row">
+        <input id="url-input" type="text"
+               placeholder="deskaccess://3mFgK9xQr2Pz…"
+               autocomplete="off" spellcheck="false">
+        <button class="btn btn-primary" onclick="doConnect()">Connect</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ════════════════════════════ TAB: SHARE ═════════════════════════════════ -->
+<div id="tab-share" class="tab-pane">
+
+  <!-- Generate links -->
+  <div class="section">
+    <h2>Share access to this PC</h2>
+    <div class="card">
+
+      <!-- Protocol -->
+      <div class="field-row">
+        <label class="field-label">Protocol</label>
+        <div class="duration-pills" id="protocol-pills">
+          <button class="pill active" data-proto="rdp" data-port="3389"
+                  onclick="setProtoPill(this)">RDP</button>
+          <button class="pill" data-proto="ssh" data-port="22"
+                  onclick="setProtoPill(this)">SSH</button>
+          <button class="pill" data-proto="vnc" data-port="5900"
+                  onclick="setProtoPill(this)">VNC</button>
+          <button class="pill" data-proto="custom" data-port=""
+                  onclick="setProtoPill(this)">Custom</button>
+        </div>
+
+        <div style="margin-top:8px;">
+          <p id="proto-hint" style="font-size:11px;color:#64748b;margin:0 0 6px;"></p>
+          <div id="scan-status" style="display:none;font-size:12px;color:#6b7280;margin-bottom:6px;">
+            <span id="scan-spinner">⏳</span> <span id="scan-text">Scanning…</span>
+          </div>
+          <div id="port-override" style="display:none;flex-wrap:wrap;align-items:center;gap:8px;">
+            <span style="font-size:12px;color:#6b7280;">Port:</span>
+            <input id="proto-port" type="number" min="1" max="65535"
+                   style="width:90px;background:#ffffff;border:1px solid #cbd5e1;
+                          color:#111827;padding:5px 8px;border-radius:5px;
+                          font-size:13px;font-weight:600;outline:none;"
+                   onfocus="this.style.borderColor='#2563eb'"
+                   onblur="this.style.borderColor='#cbd5e1'">
+            <span id="alt-ports" style="font-size:11px;color:#64748b;"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Access model -->
+      <div class="field-row">
+        <label class="field-label">Access type</label>
+        <p style="font-size:12px;color:#6b7280;margin:0;line-height:1.5;">
+          Temporary access works once and is valid for 1 hour. Remote access pairs the device until you remove it.
+        </p>
+      </div>
+
+      <!-- Label -->
+      <div class="field-row">
+        <label class="field-label">Label <span style="color:#94a3b8">(optional — e.g. "For Alice")</span></label>
+        <input id="invite-label" class="field-input" type="text"
+               placeholder="Leave blank for default"
+               onfocus="this.style.borderColor='#2563eb'"
+               onblur="this.style.borderColor='#cbd5e1'">
+      </div>
+
+      <div class="gen-row">
+        <button class="btn btn-primary"   onclick="generateURL('onetime')">One-Time Link</button>
+        <button class="btn btn-secondary" onclick="generateURL('pairing')">Pairing Link</button>
+      </div>
+      <p style="font-size:12px;color:#64748b;margin-top:10px;">
+        <b>One-Time</b>: temporary access for support.&nbsp;&nbsp;
+        <b>Pairing</b>: remote access for trusted devices.
+      </p>
+    </div>
+  </div>
+
+  <!-- Active invites -->
+  <div class="section">
+    <h2>Active links <span id="invite-count" style="color:#6b7280;font-size:11px;"></span></h2>
+    <div id="invite-list"><div class="empty">No links generated yet.</div></div>
+  </div>
+
+</div>
+
+<!-- ═══════════════════════════ TAB: ALLOWED ════════════════════════════════ -->
+<div id="tab-allowed" class="tab-pane">
+
+  <div class="section">
+    <h2>Allowed machines <span id="allowed-count" style="color:#6b7280;font-size:11px;"></span></h2>
+    <div class="remote-list" id="allowed-list">
+      <div class="empty">No machines are allowed yet.<br>A pairing link adds the first peer that uses it.</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ══════════════════════════ TAB: SETTINGS ════════════════════════════════ -->
+<div id="tab-settings" class="tab-pane">
+
+  <!-- Machine name -->
+  <div class="section">
+    <h2>This machine</h2>
+    <div class="card" style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+      <div style="flex:1;min-width:260px;">
+        <div class="field-label" style="margin-bottom:4px;">Machine name</div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input id="machine-name-input" class="field-input" style="max-width:280px;"
+                 placeholder="My PC"
+                 onfocus="this.style.borderColor='#2563eb'"
+                 onblur="this.style.borderColor='#cbd5e1'"
+                 onkeydown="if(event.key==='Enter')saveMachineName()">
+          <button class="btn btn-secondary btn-sm" onclick="saveMachineName()">Save</button>
+        </div>
+      </div>
+      <div style="flex:1.4;min-width:320px;">
+        <div class="field-label" style="margin-bottom:4px;">Machine ID</div>
+        <div class="path-row">
+          <div id="machine-id" class="path-value"
+               title="Stable TPM attestation key thumbprint when available. Share only with people you trust.">Loading...</div>
+          <button class="btn btn-secondary btn-sm" onclick="copyMachineID()">Copy ID</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- App protocol -->
+  <div class="section">
+    <h2>Default app protocol</h2>
+    <div class="card">
+      <div class="field-row">
+        <label class="field-label">Protocol</label>
+        <select id="app-protocol" class="field-select" onchange="onAppProtocolChange()">
+          <option value="rdp">RDP</option>
+          <option value="vnc">VNC</option>
+          <option value="ssh">SSH</option>
+          <option value="custom">Custom TCP</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <label class="field-label">Target port</label>
+        <input id="app-target-port" class="field-input" type="number" min="1" max="65535" step="1" value="3389">
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="saveAppConfig()">Save</button>
+      <div id="app-restart-note" class="restart-note">Saved — new links will use this default.</div>
+    </div>
+  </div>
+
+  <!-- Network backend -->
+  <div class="section">
+    <h2>Network backend</h2>
+    <div class="card">
+      <div class="field-row">
+        <label class="field-label">Protocol</label>
+        <select id="network-backend" class="field-select" onchange="onNetworkBackendChange()">
+          <option value="iroh">Iroh</option>
+          <option value="libp2p_relay">libp2p relay</option>
+          <option value="libp2p_dht">libp2p DHT</option>
+          <option value="bittorrent_dht">BitTorrent DHT</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <label class="field-label">Mode</label>
+        <select id="network-mode" class="field-select" onchange="onNetworkModeChange()"></select>
+      </div>
+      <div id="network-custom-row" class="field-row" style="display:none;">
+        <label id="network-custom-label" class="field-label">Custom nodes</label>
+        <textarea id="network-custom-values" class="field-textarea"></textarea>
+      </div>
+      <div id="network-interval-row" class="field-row" style="display:none;">
+        <label class="field-label">Publish interval seconds</label>
+        <input id="network-interval" class="field-input" type="number" min="30" max="3600" step="10" value="60">
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="saveNetworkConfig()">Save</button>
+      <div id="network-restart-note" class="restart-note">Saved — network settings applied.</div>
+    </div>
+  </div>
+
+  <!-- Diagnostics -->
+  <div class="section">
+    <h2>Diagnostics</h2>
+    <div class="card">
+      <div class="field-row">
+        <label class="field-label">Log location</label>
+        <div class="path-row">
+          <div id="log-location" class="path-value" title="">Loading...</div>
+          <button class="btn btn-secondary btn-sm" onclick="copyLogLocation()">Copy</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ══════════════════════════════ MODALS ═══════════════════════════════════ -->
+
+<!-- URL display modal -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <h3 id="modal-title">Share this link</h3>
+    <div class="url-display" id="modal-url" onclick="copyURL()" title="Click to copy">…</div>
+    <div class="expiry-bar"><div class="expiry-fill" id="expiry-fill" style="width:100%"></div></div>
+    <div class="expiry-text" id="expiry-text"></div>
+    <p class="modal-note" id="modal-note"></p>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="copyURL()">Copy Link</button>
+      <button class="btn btn-primary"   onclick="closeModal()">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- RDP setup required modal -->
+<div class="modal-overlay" id="rdp-setup-modal">
+  <div class="modal" style="max-width:540px;">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;">
+      <div style="width:40px;height:40px;background:#fff7ed;border-radius:10px;
+                  display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;">⚠️</div>
+      <div>
+        <h3 style="margin-bottom:2px;">Remote Desktop not enabled</h3>
+        <p style="font-size:13px;color:#64748b;">
+          Enable it on this machine before sharing the pairing link.
+        </p>
+      </div>
+    </div>
+    <div id="rdp-setup-steps"></div>
+    <div id="rdp-check-result" style="display:none;border-radius:8px;padding:10px 14px;
+         font-size:13px;margin-top:14px;"></div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px;">
+      <button class="btn btn-secondary" onclick="recheckRDP()">Check Again</button>
+      <button class="btn btn-secondary" onclick="skipRDPCheck()" title="Generate link anyway">Skip Warning</button>
+      <button id="rdp-continue-btn" class="btn btn-primary" style="display:none"
+              onclick="proceedPairingInvite()">Generate Pairing Link</button>
+      <button class="btn btn-secondary"
+              onclick="document.getElementById('rdp-setup-modal').classList.remove('open')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Manual connect fallback -->
+<div class="modal-overlay" id="manual-modal">
+  <div class="modal">
+    <h3>Tunnel Ready — Connect Manually</h3>
+    <p style="font-size:13px;color:#64748b;margin:12px 0;" id="manual-reason"></p>
+    <div style="background:#f8fafc;border:1px solid #2563eb;border-radius:8px;
+                padding:16px;text-align:center;margin:16px 0;">
+      <div style="font-size:11px;color:#64748b;margin-bottom:6px;">Connect your RDP client to</div>
+      <div id="manual-addr" style="font-size:22px;font-weight:700;
+           font-family:monospace;color:#2563eb;letter-spacing:2px;"></div>
+    </div>
+    <div style="font-size:12px;color:#64748b;line-height:1.9;margin-bottom:20px;">
+      <b style="color:#111827;">Windows:</b>
+        <code style="background:#f1f5f9;padding:1px 6px;border-radius:3px;font-size:11px;" class="win-cmd">…</code><br>
+      <b style="color:#111827;">Linux:</b>
+        <code style="background:#f1f5f9;padding:1px 6px;border-radius:3px;font-size:11px;" class="linux-cmd">…</code><br>
+      <b style="color:#111827;">Mac:</b>
+        <code style="background:#f1f5f9;padding:1px 6px;border-radius:3px;font-size:11px;" class="mac-cmd">…</code>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;">
+      <button class="btn btn-secondary" onclick="copyManualAddr()">Copy Address</button>
+      <button class="btn btn-primary" onclick="document.getElementById('manual-modal').classList.remove('open')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Error modal -->
+<div class="modal-overlay" id="error-modal">
+  <div class="modal">
+    <h3 id="error-title">Connection failed</h3>
+    <p class="modal-note" id="error-message"></p>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="closeErrorDialog()">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="network-status-bar warn" id="network-status-bar">
+  <span class="network-status-dot"></span>
+  <span class="network-status-main" id="network-status-main">Network: checking...</span>
+  <span class="network-status-detail" id="network-status-detail"></span>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let modalURL = '';
+let expiryDate = null;
+let expiryTimer = null;
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    if (b.textContent.toLowerCase().startsWith(name)) b.classList.add('active');
+  });
+  try { localStorage.setItem('rdpa-tab', name); } catch (_) {}
+}
+
+// Restore last tab on load
+(function() {
+  try {
+    const saved = localStorage.getItem('rdpa-tab');
+    if (saved) switchTab(saved);
+  } catch (_) {}
+})();
+
+// ── Status ───────────────────────────────────────────────────────────────────
+async function loadStatus() {
+  const r = await fetch('/api/status');
+  const s = await r.json();
+  document.getElementById('label-badge').textContent = s.label;
+  document.getElementById('machine-name-input').value = s.label;
+  const machineID = document.getElementById('machine-id');
+  if (machineID) {
+    machineID.textContent = s.machine_id || s.node_id || 'Unavailable';
+    const source = s.machine_id_source === 'tpm_attestation_key'
+      ? 'TPM attestation key thumbprint'
+      : 'Software peer ID fallback';
+    machineID.title = (s.machine_id || s.node_id)
+      ? `${source}. Share only with people you trust.`
+      : '';
+  }
+  const logLocation = document.getElementById('log-location');
+  if (logLocation) {
+    logLocation.textContent = s.log_file || 'File logging disabled';
+    logLocation.title = s.log_file || '';
+  }
+  const identityEl = document.getElementById('identity-badge');
+  if (s.identity_hardware_backed || s.tpm_backend) {
+    identityEl.textContent = 'TPM' + (s.tpm_vendor ? ' ' + s.tpm_vendor : '');
+    identityEl.title = 'Hardware-backed identity certificates';
+    identityEl.style.background = '#dcfce7';
+    identityEl.style.color = '#166534';
+    identityEl.style.display = '';
+  } else {
+    identityEl.textContent = 'Software identity';
+    identityEl.title = 'Software-generated identity certificates';
+    identityEl.style.background = '#f1f5f9';
+    identityEl.style.color = '#334155';
+    identityEl.style.display = '';
+  }
+  renderNetworkStatus(s.network_status || { share_backend: s.share_backend });
+}
+
+function renderNetworkStatus(status) {
+  const bar = document.getElementById('network-status-bar');
+  const main = document.getElementById('network-status-main');
+  const detail = document.getElementById('network-status-detail');
+  if (!bar || !main || !detail) return;
+
+  const backend = status.share_backend || 'unknown';
+  let state = 'warn';
+  let title = `${backendLabel(backend)}: starting`;
+  let parts = [];
+  const applyErr = status.last_apply_error || '';
+
+  if (backend === 'iroh') {
+    const iroh = status.iroh || {};
+    const running = !!iroh.running;
+    const ready = !!iroh.ready;
+    state = running && ready ? 'ok' : 'bad';
+    title = `Iroh: ${running && ready ? 'connected' : running ? 'waiting for relay' : 'not running'}`;
+    if (iroh.endpoint_id) parts.push('endpoint ' + String(iroh.endpoint_id).slice(0, 12));
+    if (iroh.relay_enabled) parts.push(`${iroh.relay_urls || 0} relay URLs`);
+    if (iroh.direct_addrs) parts.push(`${iroh.direct_addrs} direct addrs`);
+    if (iroh.last_error) parts.push('reason: ' + iroh.last_error);
+  } else if (backend === 'libp2p_relay') {
+    const relay = status.relay || {};
+    const connected = !!relay.connected;
+    state = connected ? 'ok' : 'bad';
+    title = `libp2p relay: ${connected ? 'connected' : 'not connected'}`;
+    parts.push(`${relay.reserved_addrs || 0} reserved addrs`);
+    parts.push(`${relay.relay_count || 0} relay candidates`);
+    if (relay.last_error) parts.push('reason: ' + relay.last_error);
+  } else if (backend === 'libp2p_dht') {
+    const dht = status.dht || {};
+    const ready = !!dht.ready;
+    state = ready ? 'ok' : dht.running ? 'warn' : 'bad';
+    title = `libp2p DHT: ${ready ? 'connected' : dht.running ? 'bootstrapping' : 'not running'}`;
+    parts.push(`${dht.routing_table_size || 0} peers`);
+    if (dht.last_error) parts.push('reason: ' + dht.last_error);
+  } else if (backend === 'bittorrent_dht') {
+    const bt = status.bittorrent_dht || {};
+    const ready = !!bt.ready;
+    state = ready ? 'ok' : bt.running ? 'warn' : 'bad';
+    title = `BitTorrent DHT: ${ready ? 'connected' : bt.running ? 'bootstrapping' : 'not running'}`;
+    if (bt.last_published && !String(bt.last_published).startsWith('0001')) {
+      parts.push('published ' + ago(bt.last_published));
+    }
+    if (bt.last_publish_err) parts.push('publish: ' + bt.last_publish_err);
+    if (bt.last_error) parts.push('reason: ' + bt.last_error);
+  }
+  if (applyErr) {
+    state = 'bad';
+    parts.unshift('apply failed: ' + applyErr);
+  }
+
+  bar.className = 'network-status-bar ' + state;
+  main.textContent = title;
+  detail.textContent = parts.filter(Boolean).join(' · ');
+}
+
+function backendLabel(backend) {
+  return {
+    iroh: 'Iroh',
+    libp2p_relay: 'libp2p relay',
+    libp2p_dht: 'libp2p DHT',
+    bittorrent_dht: 'BitTorrent DHT',
+  }[backend] || backend;
+}
+
+function copyLogLocation() {
+  const text = document.getElementById('log-location').textContent;
+  if (!text || text === 'Loading...' || text === 'File logging disabled') return;
+  navigator.clipboard.writeText(text);
+  showToast('Log location copied');
+}
+
+function copyMachineID() {
+  const text = document.getElementById('machine-id').textContent;
+  if (!text || text === 'Loading...' || text === 'Unavailable') return;
+  navigator.clipboard.writeText(text);
+  showToast('Machine ID copied');
+}
+
+async function renameThisMachine() {
+  const current = document.getElementById('label-badge').textContent;
+  const name = prompt('Rename this machine:', current);
+  if (!name || !name.trim() || name.trim() === current) return;
+  await applyMachineName(name.trim());
+}
+
+async function saveMachineName() {
+  const input = document.getElementById('machine-name-input');
+  const name = input.value.trim();
+  if (!name) return;
+  await applyMachineName(name);
+}
+
+async function applyMachineName(name) {
+  const r = await fetch('/api/label', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label: name })
+  });
+  if (r.ok) {
+    const d = await r.json();
+    document.getElementById('label-badge').textContent = d.label;
+    document.getElementById('machine-name-input').value = d.label;
+    showToast('Machine renamed');
+  } else {
+    showToast('Rename failed', true);
+  }
+}
+
+// ── Remotes ───────────────────────────────────────────────────────────────────
+let latestRemotes = [];
+
+async function loadRemotes() {
+  const r = await fetch('/api/remotes');
+  const list = await r.json();
+  renderRemotes(list);
+}
+
+function renderRemotes(list) {
+  latestRemotes = Array.isArray(list) ? list : [];
+  const el = document.getElementById('remote-list');
+
+  if (!latestRemotes.length) {
+    el.innerHTML = '<div class="empty">No paired machines yet.<br>Use a Pairing Link on the Share tab to add one.</div>';
+    document.getElementById('online-badge').textContent = '';
+    return;
+  }
+
+  const connected = latestRemotes.filter(x => x.connected).length;
+  document.getElementById('online-badge').textContent = `${connected}/${latestRemotes.length} connected`;
+
+  el.innerHTML = latestRemotes.map(r => `
+    <div class="remote-card" id="card-${r.node_id}">
+      <div class="dot ${r.connected ? 'online' : 'offline'}"></div>
+      <div class="remote-info">
+        <div class="remote-name">
+          <span class="remote-name-text" id="name-${r.node_id}">${esc(r.label)}</span>
+          <input class="remote-name-input" id="input-${r.node_id}"
+                 value="${esc(r.label)}"
+                 onkeydown="nameKey(event,'${r.node_id}')"
+                 onblur="saveRename('${r.node_id}')">
+          <button class="rename-btn" onclick="startRename('${r.node_id}')" title="Rename">✏️</button>
+        </div>
+        <div class="remote-status">
+          ${remoteStatusText(r)}
+          ${r.connected && r.conn_type ? connBadge(r.conn_type) : ''}
+        </div>
+        ${r.connected ? `<div class="remote-status" style="color:#166534;">Connected · ${esc(r.connected_protocol || 'rdp')} · ${esc(r.local_addr || '')}</div>` : ''}
+        ${r.connecting ? `<div class="remote-status" style="color:#2563eb;">${esc(r.connect_message || 'Connecting')}</div>` : ''}
+        <div class="remote-status" id="connect-status-${r.node_id}" style="${r.connecting ? '' : 'display:none;'}color:#2563eb;">${r.connecting ? esc(r.connect_message || 'Connecting') : ''}</div>
+      </div>
+      <div class="remote-btns">
+        ${r.connected ? `<button class="btn btn-primary" id="launch-${r.node_id}"
+                onclick="launchPaired('${r.node_id}')">Launch ${launchProtocolLabel(r.connected_protocol || r.protocol || 'rdp')}</button>` : ''}
+        ${r.connected && r.local_addr ? `<button class="btn btn-secondary" id="copy-${r.node_id}"
+                onclick="copyRemoteAddr('${r.node_id}')">Copy Address</button>` : ''}
+        ${r.connecting && !r.connected ? `<button class="btn btn-secondary" id="connect-${r.node_id}" disabled>Connecting...</button>
+        <button class="btn btn-danger" id="cancel-${r.node_id}" onclick="cancelConnect('${r.node_id}')">Cancel</button>` : `<button class="btn ${r.connected ? 'btn-secondary' : 'btn-primary'}" id="connect-${r.node_id}"
+                onclick="${r.connected ? `disconnectPaired('${r.node_id}')` : `connectPaired('${r.node_id}')`}">${r.connected ? 'Disconnect' : 'Connect'}</button>`}
+        <button class="btn btn-danger" onclick="removeRemote('${r.node_id}')">✕</button>
+      </div>
+    </div>`).join('');
+}
+
+function remoteStatusText(r) {
+  if (r.connected) {
+    return 'Connected';
+  }
+  return 'Not connected';
+}
+
+function launchProtocolLabel(proto) {
+  const p = String(proto || 'rdp').toLowerCase();
+  if (p === 'ssh') return 'SSH';
+  if (p === 'vnc') return 'VNC';
+  return 'RDP';
+}
+
+// ── Protocol pill ─────────────────────────────────────────────────────────────
+const protoHints = {
+  rdp:    'Port 3389. Requires Remote Desktop enabled on host.',
+  ssh:    'Port 22. Requires OpenSSH server on host.',
+  vnc:    'Port 5900/5901. Check which port your VNC server uses.',
+  custom: 'Tunnel any TCP port — enter the port number below.',
+};
+const variablePortProtos = new Set(['vnc', 'custom']);
+
+function setProtoPill(el, preferredPort) {
+  document.querySelectorAll('#protocol-pills .pill').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('proto-hint').textContent = protoHints[el.dataset.proto] || '';
+  scanPorts(el.dataset.proto, preferredPort);
+}
+
+async function scanPorts(proto, preferredPort) {
+  const portRow    = document.getElementById('port-override');
+  const portInput  = document.getElementById('proto-port');
+  const scanStatus = document.getElementById('scan-status');
+  const scanText   = document.getElementById('scan-text');
+  const altPorts   = document.getElementById('alt-ports');
+
+  if (proto === 'custom') {
+    portRow.style.display = 'flex';
+    portInput.value = preferredPort || '';
+    portInput.placeholder = 'enter port…';
+    scanStatus.style.display = 'none';
+    altPorts.textContent = '';
+    return;
+  }
+
+  portRow.style.display = 'none';
+  scanStatus.style.display = 'block';
+  scanText.textContent = 'Scanning for ' + proto.toUpperCase() + '…';
+  document.getElementById('scan-spinner').textContent = '⏳';
+  altPorts.textContent = '';
+
+  try {
+    const r = await fetch('/api/scan?protocol=' + proto);
+    const d = await r.json();
+
+    scanStatus.style.display = 'none';
+    portRow.style.display = 'flex';
+
+    if (d.found) {
+      portInput.value = preferredPort || d.best;
+      portInput.style.borderColor = '#22c55e';
+      setTimeout(() => portInput.style.borderColor = '#cbd5e1', 2000);
+
+      const others = (d.ports || []).filter(p => p !== d.best);
+      if (others.length) {
+        altPorts.innerHTML = 'Also found: ' +
+          others.map(p =>
+            `<a href="#" onclick="document.getElementById('proto-port').value=${p};return false;"
+               style="color:#2563eb;text-decoration:none;">${p}</a>`
+          ).join(', ');
+      } else {
+        altPorts.textContent = 'Found on port ' + d.best;
+      }
+
+      if (!variablePortProtos.has(proto)) {
+        portRow.style.display = 'none';
+        scanStatus.style.display = 'block';
+        document.getElementById('scan-spinner').textContent = '✅';
+        scanText.textContent = proto.toUpperCase() + ' found on port ' + d.best;
+      }
+    } else {
+      portInput.value = preferredPort || defaultPortFor(proto);
+      portInput.style.borderColor = '#dc2626';
+      setTimeout(() => portInput.style.borderColor = '#cbd5e1', 3000);
+
+      if (!variablePortProtos.has(proto)) {
+        portRow.style.display = 'none';
+        scanStatus.style.display = 'block';
+        document.getElementById('scan-spinner').textContent = '❌';
+        scanText.textContent = proto.toUpperCase() + ' not running on this machine';
+      } else {
+        altPorts.textContent = 'Not found — enter port manually';
+        altPorts.style.color = '#dc2626';
+      }
+    }
+  } catch (e) {
+    scanStatus.style.display = 'none';
+    portRow.style.display = 'flex';
+    portInput.placeholder = 'scan failed, enter manually';
+  }
+}
+
+function defaultPortFor(proto) {
+  return { rdp: 3389, ssh: 22, vnc: 5900, custom: '' }[proto] || 3389;
+}
+
+function selectedProto() {
+  const active = document.querySelector('#protocol-pills .pill.active');
+  return active ? active.dataset.proto : 'rdp';
+}
+
+function selectedPort() {
+  const active = document.querySelector('#protocol-pills .pill.active');
+  const proto = active ? active.dataset.proto : 'rdp';
+  const v = parseInt(document.getElementById('proto-port').value, 10);
+  if (!isNaN(v) && v !== defaultPortFor(proto)) return v;
+  if (variablePortProtos.has(proto)) {
+    return isNaN(v) ? null : v;
+  }
+  return null;
+}
+
+function setShareProtocol(proto, port) {
+  const button = document.querySelector(`#protocol-pills .pill[data-proto="${proto}"]`) ||
+                 document.querySelector('#protocol-pills .pill[data-proto="rdp"]');
+  setProtoPill(button, port);
+}
+
+// ── Duration pill ─────────────────────────────────────────────────────────────
+function setPill(el) {
+  document.querySelectorAll('#duration-pills .pill').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+}
+function selectedMins() {
+  const active = document.querySelector('#duration-pills .pill.active');
+  return active ? parseInt(active.dataset.mins, 10) : 60;
+}
+function durationLabel(mins) {
+  if (mins === 0)    return 'Until revoked';
+  if (mins < 60)     return `${mins} minutes`;
+  if (mins < 1440)   return `${mins/60} hour${mins/60>1?'s':''}`;
+  return `${mins/1440} day${mins/1440>1?'s':''}`;
+}
+
+// ── Config ───────────────────────────────────────────────────────────────────
+let networkConfig = {
+  relay: { mode: 'disabled', servers: [] },
+  dht: { mode: 'disabled', bootstrap: [] },
+  bittorrent_dht: { mode: 'disabled', bootstrap: [], publish_interval_secs: 60 },
+  iroh: { mode: 'public', servers: [] },
+};
+
+const networkBackends = {
+  libp2p_relay: {
+    configKey: 'relay',
+    modeLabels: {
+      public: 'Public',
+      custom: 'Custom only',
+    },
+    modes: ['public', 'custom'],
+    valuesKey: 'servers',
+    customLabel: 'Custom relay server multiaddrs (one per line)',
+    placeholder: '/ip4/1.2.3.4/tcp/4001/p2p/12D3KooW...',
+  },
+  libp2p_dht: {
+    configKey: 'dht',
+    modeLabels: {
+      public: 'Public',
+      custom: 'Custom only',
+    },
+    modes: ['public', 'custom'],
+    valuesKey: 'bootstrap',
+    customLabel: 'Custom bootstrap node multiaddrs (one per line)',
+    placeholder: '/ip4/1.2.3.4/tcp/4001/p2p/12D3KooW...',
+  },
+  bittorrent_dht: {
+    configKey: 'bittorrent_dht',
+    modeLabels: {
+      public: 'Public BitTorrent DHT',
+      custom: 'Custom only',
+    },
+    modes: ['public', 'custom'],
+    valuesKey: 'bootstrap',
+    customLabel: 'Custom bootstrap routers (one host:port per line)',
+    placeholder: 'router.example.com:6881',
+    hasInterval: true,
+  },
+  iroh: {
+    configKey: 'iroh',
+    modeLabels: {
+      public: 'Public iroh relays',
+      custom: 'Custom only',
+    },
+    modes: ['public', 'custom'],
+    valuesKey: 'servers',
+    customLabel: 'Custom iroh relay URLs (one per line)',
+    placeholder: 'https://relay.example.com/',
+  },
+};
+
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/config');
+    if (!r.ok) return;
+    const d = await r.json();
+
+    const app = d.app || {};
+    const appProto = app.protocol || 'rdp';
+    const appPort = app.target_port || defaultPortFor(appProto);
+    document.getElementById('app-protocol').value = appProto;
+    document.getElementById('app-target-port').value = appPort;
+    setShareProtocol(appProto, appPort);
+
+    networkConfig = {
+      relay: d.relay || networkConfig.relay,
+      dht: d.dht || networkConfig.dht,
+      bittorrent_dht: d.bittorrent_dht || networkConfig.bittorrent_dht,
+      iroh: d.iroh || networkConfig.iroh,
+    };
+    if (d.share_backend) {
+      document.getElementById('network-backend').value = d.share_backend;
+    }
+    renderNetworkConfig();
+  } catch (_) {}
+}
+
+function onAppProtocolChange() {
+  const proto = document.getElementById('app-protocol').value;
+  document.getElementById('app-target-port').value = defaultPortFor(proto) || '';
+}
+
+function renderNetworkConfig() {
+  const backend = document.getElementById('network-backend').value || activeNetworkBackend();
+  const meta = networkBackends[backend];
+  const cfg = networkConfig[meta.configKey] || {};
+  let mode = cfg.mode || meta.modes[0];
+  if (mode === 'mixed') mode = 'custom';
+  if (!meta.modes.includes(mode)) mode = meta.modes[0];
+  const modeSelect = document.getElementById('network-mode');
+  modeSelect.innerHTML = meta.modes.map(mode =>
+    `<option value="${mode}">${meta.modeLabels[mode]}</option>`
+  ).join('');
+  modeSelect.value = mode;
+
+  document.getElementById('network-custom-label').textContent = meta.customLabel;
+  const values = cfg[meta.valuesKey] || [];
+  const custom = document.getElementById('network-custom-values');
+  custom.value = values.join('\n');
+  custom.placeholder = meta.placeholder;
+
+  document.getElementById('network-interval-row').style.display = meta.hasInterval ? 'block' : 'none';
+  document.getElementById('network-interval').value = cfg.publish_interval_secs || 60;
+  onNetworkModeChange();
+}
+
+function activeNetworkBackend() {
+  return document.getElementById('network-backend').value || 'iroh';
+}
+
+function onNetworkBackendChange() {
+  renderNetworkConfig();
+}
+
+function onNetworkModeChange() {
+  const selectedMode = document.getElementById('network-mode').value;
+  document.getElementById('network-custom-row').style.display =
+    selectedMode === 'custom' ? 'block' : 'none';
+}
+
+async function saveAppConfig() {
+  const protocol = document.getElementById('app-protocol').value;
+  const target_port = Number(document.getElementById('app-target-port').value) || Number(defaultPortFor(protocol));
+  if (!target_port || target_port < 1 || target_port > 65535) {
+    showToast('Enter a valid target port', true);
+    return;
+  }
+  const r = await fetch('/api/config', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app: { protocol, target_port } })
+  });
+  if (r.ok) {
+    document.getElementById('app-restart-note').classList.add('show');
+    setShareProtocol(protocol, target_port);
+    showToast('Default protocol saved');
+  } else {
+    showToast('Save failed', true);
+  }
+}
+
+async function saveNetworkConfig() {
+  const backend = document.getElementById('network-backend').value;
+  const meta = networkBackends[backend];
+  const configKey = meta.configKey || backend;
+  const mode = document.getElementById('network-mode').value;
+  const values = document.getElementById('network-custom-values').value
+    .split('\n').map(s => s.trim()).filter(Boolean);
+  const payload = { share_backend: backend };
+  payload[configKey] = { mode };
+  payload[configKey][meta.valuesKey] = values;
+  if (meta.hasInterval) {
+    payload[configKey].publish_interval_secs = Number(document.getElementById('network-interval').value) || 60;
+  }
+  const r = await fetch('/api/config', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (r.ok) {
+    const d = await r.json();
+    networkConfig[configKey] = payload[configKey];
+    document.getElementById('network-restart-note').classList.add('show');
+    showToast(d.applied ? 'Network settings applied' : 'Network config saved');
+  } else {
+    showToast('Save failed', true);
+  }
+}
+
+// ── RDP setup check ───────────────────────────────────────────────────────────
+let _pendingPairingType = 'pairing';
+
+async function generateURL(type) {
+  if (type === 'pairing') {
+    const ready = await checkRDPReady();
+    if (!ready) return;
+  }
+  await _doGenerateURL(type);
+}
+
+async function checkRDPReady() {
+  const proto = selectedProto();
+  const port  = selectedPort() || defaultPortFor(proto);
+  const r = await fetch(`/api/health?protocol=${proto}&port=${port}`);
+  const h = await r.json();
+  if (h.server.listening) return true;
+  _pendingPairingType = 'pairing';
+  showRDPSetupModal(h, proto);
+  return false;
+}
+
+function showRDPSetupModal(health, proto) {
+  proto = proto || 'rdp';
+  const os = health.os || 'linux';
+  document.querySelector('#rdp-setup-modal h3').textContent = proto.toUpperCase() + ' not enabled';
+  document.querySelector('#rdp-setup-modal p').textContent =
+    `Enable ${proto.toUpperCase()} on this machine before sharing the pairing link.`;
+
+  const steps = setupStepsFor(os, proto);
+  const container = document.getElementById('rdp-setup-steps');
+  container.innerHTML = steps.map((s, i) => `
+    <div class="setup-step">
+      <div class="step-num">${i+1}</div>
+      <div class="step-body">
+        <div class="step-title">${s.title}</div>
+        ${s.cmd ? `<div class="step-cmd" onclick="copyCmd(this, '${s.cmd.replace(/'/g,"\\'")}')">
+          <span>${esc(s.cmd)}</span>
+          <span style="color:#94a3b8;font-size:10px;">click to copy</span>
+        </div>` : ''}
+        ${s.note ? `<div class="step-note">${s.note}</div>` : ''}
+      </div>
+    </div>`).join('');
+
+  document.getElementById('rdp-check-result').style.display = 'none';
+  document.getElementById('rdp-continue-btn').style.display = 'none';
+  document.getElementById('rdp-setup-modal').classList.add('open');
+}
+
+function setupStepsFor(os, proto) {
+  if (proto === 'vnc') return vncSetupSteps(os);
+  if (proto === 'ssh') return sshSetupSteps(os);
+  return rdpSetupSteps(os);
+}
+
+function rdpSetupSteps(os) {
+  if (os === 'windows') return [
+    { title: 'Open Windows Settings', cmd: 'ms-settings:remotedesktop',
+      note: 'Or: Settings → System → Remote Desktop' },
+    { title: 'Enable "Remote Desktop"',
+      note: 'Toggle it on. Windows adds the firewall rule automatically.' },
+    { title: 'Note your PC name',
+      note: 'When prompted by mstsc, use your Windows username and password.' },
+  ];
+  return [
+    { title: 'Install xrdp', cmd: 'sudo apt install xrdp',
+      note: 'Fedora: sudo dnf install xrdp  ·  Arch: sudo pacman -S xrdp' },
+    { title: 'Enable xrdp', cmd: 'sudo systemctl enable --now xrdp' },
+    { title: 'Allow through firewall', cmd: 'sudo ufw allow 3389/tcp',
+      note: 'Only needed if ufw is active.' },
+  ];
+}
+
+function vncSetupSteps(os) {
+  if (os === 'windows') return [
+    { title: 'Install TightVNC Server', note: 'Download from tightvnc.com → set a VNC password' },
+    { title: 'Start TightVNC Server', note: 'It will appear in the system tray on port 5900.' },
+  ];
+  return [
+    { title: 'Install TigerVNC', cmd: 'sudo apt install tigervnc-standalone-server' },
+    { title: 'Start VNC session', cmd: 'vncserver :1 -geometry 1920x1080 -depth 24',
+      note: 'Set a password when prompted. Runs on port 5901.' },
+  ];
+}
+
+function sshSetupSteps(os) {
+  if (os === 'windows') return [
+    { title: 'Open Optional Features', cmd: 'ms-settings:optionalfeatures' },
+    { title: 'Add "OpenSSH Server"', note: 'Search in the list and click Install.' },
+    { title: 'Start SSH service', cmd: 'Start-Service sshd',
+      note: 'Run in PowerShell as Administrator.' },
+  ];
+  return [
+    { title: 'Install OpenSSH server', cmd: 'sudo apt install openssh-server' },
+    { title: 'Enable SSH', cmd: 'sudo systemctl enable --now ssh' },
+  ];
+}
+
+async function recheckRDP() {
+  const proto = selectedProto();
+  const port  = selectedPort();
+  let url = '/api/health?protocol=' + proto;
+  if (port !== null) url += '&port=' + port;
+  const h = await (await fetch(url)).json();
+  const el = document.getElementById('rdp-check-result');
+  const continueBtn = document.getElementById('rdp-continue-btn');
+
+  if (h.server.listening) {
+    el.style.cssText = 'display:block;background:#ecfdf5;border:1px solid #86efac;color:#166534;';
+    el.innerHTML = 'Remote Desktop is now enabled!';
+    continueBtn.style.display = '';
+  } else {
+    el.style.cssText = 'display:block;background:#fef2f2;border:1px solid #fecaca;color:#991b1b;';
+    el.innerHTML = 'Still not detected. Complete the steps above and try again.';
+    continueBtn.style.display = 'none';
+  }
+}
+
+function skipRDPCheck() {
+  document.getElementById('rdp-setup-modal').classList.remove('open');
+  _doGenerateURL(_pendingPairingType);
+}
+
+async function proceedPairingInvite() {
+  document.getElementById('rdp-setup-modal').classList.remove('open');
+  await _doGenerateURL(_pendingPairingType);
+}
+
+function copyCmd(el, cmd) {
+  navigator.clipboard.writeText(cmd);
+  const span = el.querySelector('span:last-child');
+  const orig = span.textContent;
+  span.textContent = 'copied';
+  setTimeout(() => span.textContent = orig, 1500);
+}
+
+// ── Generate URL ──────────────────────────────────────────────────────────────
+async function _doGenerateURL(type) {
+  const mins  = type === 'onetime' ? 60 : 0;
+  const label = document.getElementById('invite-label').value.trim();
+  const proto = selectedProto();
+  const port  = selectedPort();
+  const body  = { duration_mins: mins, label, protocol: proto };
+  if (port !== null) body.port = port;
+  const r = await fetch(`/api/url/${type}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) {
+    const msg = await responseError(r);
+    showToast(msg, true);
+    showErrorDialog('Link creation failed', msg);
+    return;
+  }
+  const d = await r.json();
+
+  modalURL   = d.url;
+  expiryDate = null;
+
+  document.getElementById('modal-url').textContent   = d.url;
+  document.getElementById('modal-title').textContent =
+    type === 'onetime' ? 'One-Time Access Link' : 'Pairing Link';
+
+  document.getElementById('modal-note').textContent  =
+    type === 'onetime'
+      ? 'Temporary access. Works once and is valid for 1 hour.'
+      : 'Remote access. After opening, their device stays allowed until you remove it.';
+
+  document.getElementById('invite-label').value = '';
+  loadInvites();
+  showAccessModel(type);
+  document.getElementById('modal').classList.add('open');
+}
+
+function showAccessModel(type) {
+  clearInterval(expiryTimer);
+  const fill = document.getElementById('expiry-fill');
+  const text = document.getElementById('expiry-text');
+  fill.style.width = '100%';
+  fill.style.background = type === 'onetime' ? '#2563eb' : '#22c55e';
+  text.textContent = type === 'onetime'
+    ? 'Temporary access · valid for 1 hour'
+    : 'Remote access · allowed until removed';
+}
+
+function copyURL() {
+  navigator.clipboard.writeText(modalURL);
+  showToast('Link copied');
+}
+function closeModal() {
+  document.getElementById('modal').classList.remove('open');
+  clearInterval(expiryTimer);
+}
+
+// ── Connect ───────────────────────────────────────────────────────────────────
+async function doConnect() {
+  const url = document.getElementById('url-input').value.trim();
+  if (!url) { showToast('Paste a link first', true); return; }
+  showToast('Starting connection…');
+  const stopPolling = pollToastConnectStatusByURL(url);
+  try {
+    const r = await fetch('/api/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    if (r.ok) {
+      handleLaunchResult(await r.json());
+      document.getElementById('url-input').value = '';
+    } else {
+      const msg = await responseError(r);
+      showToast(msg, true);
+      showErrorDialog('Connection failed', msg);
+    }
+  } finally {
+    stopPolling();
+  }
+}
+
+async function connectPaired(nodeId) {
+  const btn = document.getElementById('connect-' + nodeId);
+  const statusEl = document.getElementById('connect-status-' + nodeId);
+  if (btn && btn.disabled) return;
+  const original = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Connecting...';
+  }
+  setConnectStatusText(nodeId, 'Starting connection');
+  showToast('Starting connection…');
+  const stopPolling = pollConnectStatus('peer:' + nodeId, nodeId);
+  try {
+    const r = await fetch('/api/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ node_id: nodeId })
+    });
+    if (r.ok) {
+      const result = await r.json();
+      handleLaunchResult(result);
+      if (result.local_addr) {
+        setConnectStatusText(nodeId, 'Connected · ' + result.local_addr);
+      }
+      await loadRemotes();
+    }
+    else {
+      const msg = await responseError(r);
+      setConnectStatusText(nodeId, 'Failed: ' + msg, true);
+      showToast(msg, true);
+      showErrorDialog('Connection failed', msg);
+    }
+  } finally {
+    stopPolling();
+    if (btn) {
+      const stillConnect = btn.getAttribute('onclick') && btn.getAttribute('onclick').includes('connectPaired');
+      if (stillConnect) {
+        btn.textContent = original;
+        btn.disabled = false;
+      }
+    }
+    if (statusEl) {
+      setTimeout(() => {
+        statusEl.style.display = 'none';
+      }, 8000);
+    }
+  }
+}
+
+async function disconnectPaired(nodeId) {
+  const btn = document.getElementById('connect-' + nodeId);
+  if (btn && btn.disabled) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Disconnecting...';
+  }
+  setConnectStatusText(nodeId, 'Disconnecting');
+  try {
+    const r = await fetch('/api/disconnect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ node_id: nodeId })
+    });
+    if (!r.ok) throw new Error(await responseError(r));
+    setConnectStatusText(nodeId, 'Disconnected');
+    showToast('Disconnected');
+    await loadRemotes();
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    setConnectStatusText(nodeId, 'Disconnect failed: ' + msg, true);
+    showToast(msg, true);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+    }
+  }
+}
+
+async function cancelConnect(nodeId) {
+  const btn = document.getElementById('cancel-' + nodeId);
+  if (btn && btn.disabled) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Canceling...';
+  }
+  setConnectStatusText(nodeId, 'Canceling connection');
+  try {
+    const r = await fetch('/api/connect/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ node_id: nodeId })
+    });
+    if (!r.ok) throw new Error(await responseError(r));
+    showToast('Canceling connection');
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    setConnectStatusText(nodeId, 'Cancel failed: ' + msg, true);
+    showToast(msg, true);
+  } finally {
+    setTimeout(loadRemotes, 500);
+  }
+}
+
+async function launchPaired(nodeId) {
+  const btn = document.getElementById('launch-' + nodeId);
+  if (btn && btn.disabled) return;
+  const original = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Launching...';
+  }
+  setConnectStatusText(nodeId, 'Launching RDP');
+  try {
+    const r = await fetch('/api/launch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ node_id: nodeId })
+    });
+    if (!r.ok) throw new Error(await responseError(r));
+    const result = await r.json();
+    handleLaunchResult(result);
+    if (result.local_addr) {
+      setConnectStatusText(nodeId, 'Connected · ' + result.local_addr);
+    }
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    setConnectStatusText(nodeId, 'Launch failed: ' + msg, true);
+    showToast(msg, true);
+    showErrorDialog('Launch failed', msg);
+  } finally {
+    if (btn) {
+      btn.textContent = original;
+      btn.disabled = false;
+    }
+  }
+}
+
+function setConnectStatusText(nodeId, text, isError=false) {
+  const el = document.getElementById('connect-status-' + nodeId);
+  if (!el) return;
+  el.textContent = text;
+  el.style.display = '';
+  el.style.color = isError ? '#b91c1c' : '#2563eb';
+}
+
+function pollConnectStatus(key, nodeId) {
+  let stopped = false;
+  let timer = null;
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const r = await fetch('/api/connect/status?key=' + encodeURIComponent(key));
+      if (r.ok) {
+        const st = await r.json();
+        if (st && st.message) {
+          const suffix = st.local_addr ? ` · ${st.local_addr}` : '';
+          setConnectStatusText(nodeId, st.error ? `${st.message}: ${st.error}` : `${st.message}${suffix}`, !!st.error);
+        }
+        if (st && st.done) {
+          if (nodeId) loadRemotes();
+          return;
+        }
+      }
+    } catch (_) {}
+    timer = setTimeout(tick, 700);
+  };
+  tick();
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
+}
+
+function pollToastConnectStatus(key) {
+  let stopped = false;
+  let timer = null;
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const r = await fetch('/api/connect/status?key=' + encodeURIComponent(key));
+      if (r.ok) {
+        const st = await r.json();
+        if (st && st.stage !== 'idle' && st.message) {
+          showToast(st.local_addr ? `${st.message} · ${st.local_addr}` : st.message, !!st.error);
+        }
+        if (st && st.done) return;
+      }
+    } catch (_) {}
+    timer = setTimeout(tick, 700);
+  };
+  tick();
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
+}
+
+function pollToastConnectStatusByURL(url) {
+  return pollConnectStatusURL('/api/connect/status?url=' + encodeURIComponent(url), null);
+}
+
+function pollConnectStatusURL(statusURL, nodeId) {
+  let stopped = false;
+  let timer = null;
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const r = await fetch(statusURL);
+      if (r.ok) {
+        const st = await r.json();
+        if (st && st.stage !== 'idle' && st.message) {
+          const text = st.local_addr ? `${st.message} · ${st.local_addr}` : st.message;
+          if (nodeId) setConnectStatusText(nodeId, st.error ? `${st.message}: ${st.error}` : text, !!st.error);
+          else showToast(text, !!st.error);
+        }
+        if (st && st.done) return;
+      }
+    } catch (_) {}
+    timer = setTimeout(tick, 700);
+  };
+  tick();
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
+}
+
+function handleLaunchResult(d) {
+  if (d.launched) {
+    showToast(`${d.client} launched (${(d.protocol||'rdp').toUpperCase()})`);
+  } else if (d.local_addr) {
+    const reason = d.error || `No ${(d.protocol || 'rdp').toUpperCase()} client was launched. Copy the address and open it manually.`;
+    showManualConnect(d.local_addr, reason, d.protocol);
+  } else if (d.error) {
+    showToast(d.error, true);
+  } else {
+    showToast('Tunnel ready: ' + d.local_addr);
+  }
+}
+
+function showManualConnect(addr, reason, protocol) {
+  protocol = protocol || 'rdp';
+  const instructions = {
+    rdp: { win: 'Remote Desktop Connection → enter address above',
+           linux: `xfreerdp /v:${addr}`, mac: 'Microsoft Remote Desktop → New Connection' },
+    vnc: { win: `vncviewer ${addr}`, linux: `vncviewer ${addr}`,
+           mac: `Finder → Go → Connect to Server → vnc://${addr}` },
+    ssh: { win: `ssh -p PORT HOST`, linux: `ssh -p PORT HOST`, mac: `ssh -p PORT HOST` },
+  }[protocol] || { win: addr, linux: addr, mac: addr };
+
+  document.getElementById('manual-addr').textContent = addr;
+  document.getElementById('manual-reason').textContent = reason || '';
+  document.querySelector('#manual-modal .win-cmd').textContent   = instructions.win;
+  document.querySelector('#manual-modal .linux-cmd').textContent = instructions.linux;
+  document.querySelector('#manual-modal .mac-cmd').textContent   = instructions.mac;
+  document.getElementById('manual-modal').classList.add('open');
+}
+
+function copyManualAddr() {
+  navigator.clipboard.writeText(document.getElementById('manual-addr').textContent);
+  showToast('Address copied');
+}
+
+function copyRemoteAddr(nodeId) {
+  const remote = latestRemotes.find(r => r.node_id === nodeId);
+  if (!remote || !remote.local_addr) {
+    showToast('No local address available', true);
+    return;
+  }
+  navigator.clipboard.writeText(remote.local_addr);
+  showToast('Address copied');
+}
+
+async function removeRemote(nodeId) {
+  await fetch('/api/remotes/delete?node_id=' + nodeId, { method: 'DELETE' });
+  loadRemotes();
+}
+
+// ── Allowed machines ─────────────────────────────────────────────────────────
+async function loadAllowed() {
+  const r = await fetch('/api/allowed');
+  const list = await r.json();
+  const el = document.getElementById('allowed-list');
+  document.getElementById('allowed-count').textContent =
+    list && list.length ? `${list.length} allowed` : '';
+
+  if (!list || !list.length) {
+    el.innerHTML = '<div class="empty">No machines are allowed yet.<br>A pairing link adds the first peer that uses it.</div>';
+    return;
+  }
+
+  el.innerHTML = list.map(p => `
+    <div class="remote-card">
+      <div class="dot ${p.conn_type === 'unknown' ? 'offline' : 'online'}"></div>
+      <div class="remote-info">
+        <div class="remote-name">
+          <span class="remote-name-text" id="allowed-name-${p.node_id}">${esc(p.label || 'Allowed machine')}</span>
+          <input class="remote-name-input" id="allowed-input-${p.node_id}"
+                 value="${esc(p.label || 'Allowed machine')}"
+                 onkeydown="allowedNameKey(event, '${p.node_id}')">
+          <button class="rename-btn" onclick="startAllowedRename('${p.node_id}')" title="Rename">✎</button>
+        </div>
+        <div class="remote-status">
+          ${p.node_id.slice(0, 16)}... ${connBadge(p.conn_type)} ${identityBadge(p)} ${rootThumbprintBadge(p)}
+          · allowed ${ago(p.added_at)}
+        </div>
+      </div>
+      <div class="remote-btns">
+        <button class="btn btn-danger" onclick="removeAllowed('${p.node_id}')">Remove</button>
+      </div>
+    </div>`).join('');
+}
+
+function startAllowedRename(nodeId) {
+  document.getElementById('allowed-name-' + nodeId).style.display = 'none';
+  const input = document.getElementById('allowed-input-' + nodeId);
+  input.style.display = 'inline-block';
+  input.focus(); input.select();
+}
+
+function allowedNameKey(e, nodeId) {
+  if (e.key === 'Enter')  { e.preventDefault(); saveAllowedRename(nodeId); }
+  if (e.key === 'Escape') { cancelAllowedRename(nodeId); }
+}
+
+async function saveAllowedRename(nodeId) {
+  const input = document.getElementById('allowed-input-' + nodeId);
+  const text = document.getElementById('allowed-name-' + nodeId);
+  const label = input.value.trim();
+  if (!label) { cancelAllowedRename(nodeId); return; }
+  const r = await fetch('/api/allowed/rename', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ node_id: nodeId, label })
+  });
+  if (r.ok) { text.textContent = label; input.value = label; showToast('Allowed machine renamed'); }
+  else showToast(await r.text(), true);
+  input.style.display = 'none';
+  text.style.display = '';
+}
+
+function cancelAllowedRename(nodeId) {
+  const input = document.getElementById('allowed-input-' + nodeId);
+  input.value = document.getElementById('allowed-name-' + nodeId).textContent;
+  input.style.display = 'none';
+  document.getElementById('allowed-name-' + nodeId).style.display = '';
+}
+
+async function removeAllowed(nodeId) {
+  const r = await fetch('/api/allowed/delete?node_id=' + nodeId, { method: 'DELETE' });
+  if (r.ok) { showToast('Allowed machine removed'); loadAllowed(); }
+  else showToast(await r.text(), true);
+}
+
+// ── Invites ───────────────────────────────────────────────────────────────────
+async function loadInvites() {
+  const r = await fetch('/api/invites');
+  const list = await r.json();
+  const el   = document.getElementById('invite-list');
+  const pending = (list||[]).filter(i => i.status === 'pending').length;
+  document.getElementById('invite-count').textContent =
+    pending ? `${pending} pending` : '';
+
+  if (!list || !list.length) {
+    el.innerHTML = '<div class="empty">No links generated yet.</div>';
+    return;
+  }
+
+  el.innerHTML = list.map(inv => {
+    const accessText = inv.status === 'pending'
+      ? (inv.mode === 'onetime'
+          ? 'Temporary access · valid for 1 hour'
+          : 'Remote access · allowed until removed')
+      : '';
+    const usedLine = inv.used_by
+      ? `Used by <b>${esc(inv.used_by)}</b> ${ago(inv.used_at)}`
+      : '';
+    const meta = [accessText, usedLine].filter(Boolean).join(' · ');
+    const protoColors = { rdp:'#dbeafe', vnc:'#e0f2fe', ssh:'#dcfce7' };
+    return `<div class="invite-card ${inv.status}">
+      <span class="invite-badge badge-${inv.mode}">${inv.mode === 'onetime' ? 'One-Time' : 'Pairing'}</span>
+      <span style="font-size:10px;font-weight:600;padding:2px 7px;border-radius:20px;
+                   background:${protoColors[inv.protocol]||'#f1f5f9'};color:#334155;
+                   text-transform:uppercase;letter-spacing:.04em;">${(inv.protocol||'rdp').toUpperCase()}</span>
+      <div class="invite-info">
+        <div class="invite-label">${esc(inv.label)}</div>
+        <div class="invite-meta">
+          <span class="status-dot status-${inv.status}"></span>
+          ${inv.status.charAt(0).toUpperCase()+inv.status.slice(1)}
+          ${meta ? ' · ' + meta : ''}
+        </div>
+      </div>
+      ${inv.status === 'pending' ? `
+        <button class="btn btn-danger" style="font-size:12px;padding:6px 12px"
+                onclick="revokeInvite('${inv.id}')">Revoke</button>` : ''}
+    </div>`;
+  }).join('');
+}
+
+async function revokeInvite(id) {
+  const r = await fetch('/api/invites/revoke?id=' + id, { method: 'DELETE' });
+  if (r.ok) { showToast('Link deleted'); loadInvites(); }
+  else showToast(await r.text(), true);
+}
+
+// ── Rename remote ─────────────────────────────────────────────────────────────
+function startRename(nodeId) {
+  document.getElementById('name-' + nodeId).style.display  = 'none';
+  const input = document.getElementById('input-' + nodeId);
+  input.style.display = 'inline-block';
+  input.focus(); input.select();
+}
+
+function nameKey(e, nodeId) {
+  if (e.key === 'Enter')  { e.preventDefault(); saveRename(nodeId); }
+  if (e.key === 'Escape') { cancelRename(nodeId); }
+}
+
+async function saveRename(nodeId) {
+  const input = document.getElementById('input-' + nodeId);
+  const text  = document.getElementById('name-' + nodeId);
+  const label = input.value.trim();
+  if (!label) { cancelRename(nodeId); return; }
+  const r = await fetch('/api/remotes/rename', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ node_id: nodeId, label })
+  });
+  if (r.ok) { text.textContent = label; input.value = label; showToast('Renamed'); }
+  else showToast('Rename failed', true);
+  input.style.display = 'none';
+  text.style.display  = '';
+}
+
+function cancelRename(nodeId) {
+  const input = document.getElementById('input-' + nodeId);
+  input.value = document.getElementById('name-' + nodeId).textContent;
+  input.style.display = 'none';
+  document.getElementById('name-' + nodeId).style.display = '';
+}
+
+function connBadge(type) {
+  if (type === 'direct')  return '<span style="font-size:11px;color:#34d399;margin-left:6px" title="P2P direct">⚡ Direct</span>';
+  if (type === 'relayed') return '<span style="font-size:11px;color:#f59e0b;margin-left:6px" title="Via relay">↔ Relay</span>';
+  return '';
+}
+
+function identityBadge(p) {
+  const backend = (p.identity_backend || '').toLowerCase();
+  const hardware = !!p.identity_hardware_backed || backend === 'tpm';
+  if (hardware) {
+    const vendor = p.tpm_vendor ? esc(p.tpm_vendor) : 'Hardware';
+    const version = p.tpm_version ? ` TPM ${esc(p.tpm_version)}` : ' TPM';
+    return `<span style="font-size:11px;color:#22c55e;margin-left:6px" title="Hardware-backed certificate">${vendor}${version}</span>`;
+  }
+  return '<span style="font-size:11px;color:#64748b;margin-left:6px" title="Software identity certificate">Software cert</span>';
+}
+
+function rootThumbprintBadge(p) {
+  const thumb = (p.tpm_root_thumbprint || '').trim();
+  if (!thumb) return '';
+  return `<span style="font-size:11px;color:#0284c7;margin-left:6px" title="TPM manufacturer root SHA-256 thumbprint: ${esc(thumb)}">Root ${shortThumbprint(thumb)}</span>`;
+}
+
+function shortThumbprint(s) {
+  const clean = String(s || '').replace(/[^a-fA-F0-9]/g, '').toUpperCase();
+  if (!clean) return '';
+  if (clean.length <= 16) return clean;
+  return clean.slice(0, 8) + '...' + clean.slice(-8);
+}
+
+function esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function ago(t) {
+  if (!t || t.startsWith('0001')) return 'never';
+  const diffMs = Date.now() - new Date(t).getTime();
+  if (diffMs < 0) return timeUntil(t);
+  const m = Math.floor(diffMs / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return m + 'm ago';
+  if (m < 1440) return Math.floor(m/60) + 'h ago';
+  return Math.floor(m/1440) + 'd ago';
+}
+
+function timeUntil(t) {
+  if (!t || t.startsWith('0001')) return 'never';
+  const diff = new Date(t).getTime() - Date.now();
+  if (diff <= 0) return ago(t);
+  const mins = Math.ceil(diff / 60000);
+  if (mins < 60) return `in ${mins}m`;
+  const hours = Math.floor(mins / 60);
+  const rem = mins % 60;
+  if (hours < 24) return rem ? `in ${hours}h ${rem}m` : `in ${hours}h`;
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  return remHours ? `in ${days}d ${remHours}h` : `in ${days}d`;
+}
+
+function showToast(msg, err=false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (err ? ' err' : '');
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+async function responseError(r) {
+  const text = (await r.text()).trim();
+  return text || r.statusText || `HTTP ${r.status}`;
+}
+
+function errorMessage(e) {
+  if (!e) return 'unknown error';
+  if (typeof e === 'string') return e;
+  return e.message || String(e);
+}
+
+async function clientLog(level, message, context={}) {
+  try {
+    await fetch('/api/client-log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ level, message, context })
+    });
+  } catch (_) {
+    // If the UI cannot reach the local service, there is nowhere else to persist this.
+  }
+}
+
+function showErrorDialog(title, msg) {
+  document.getElementById('error-title').textContent = title;
+  document.getElementById('error-message').textContent = msg;
+  document.getElementById('error-modal').classList.add('open');
+}
+
+function closeErrorDialog() {
+  document.getElementById('error-modal').classList.remove('open');
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadStatus();
+loadRemotes();
+loadInvites();
+loadAllowed();
+loadConfig();
+scanPorts('rdp');
+setInterval(loadStatus, 10000);
+setInterval(loadRemotes, 30000);
+setInterval(loadInvites, 15000);
+setInterval(loadAllowed, 15000);
+</script>
+</body>
+</html>

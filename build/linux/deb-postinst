@@ -1,0 +1,33 @@
+#!/bin/sh
+set -e
+
+if ! getent group deskaccess >/dev/null; then
+  addgroup --system deskaccess >/dev/null
+fi
+
+if ! id deskaccess >/dev/null 2>&1; then
+  adduser --system --ingroup deskaccess --home /var/lib/deskaccess \
+    --no-create-home --disabled-login --disabled-password deskaccess >/dev/null
+fi
+
+mkdir -p /etc/deskaccess /var/lib/deskaccess
+chown deskaccess:deskaccess /etc/deskaccess /var/lib/deskaccess
+
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+  usermod -aG deskaccess "$SUDO_USER" || true
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+  systemctl enable deskaccess.service || true
+  systemctl restart deskaccess.service || true
+fi
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database /usr/share/applications || true
+fi
+if command -v xdg-mime >/dev/null 2>&1; then
+  xdg-mime default deskaccess.desktop x-scheme-handler/deskaccess || true
+fi
+
+exit 0

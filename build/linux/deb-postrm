@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+fi
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database /usr/share/applications || true
+fi
+
+if [ "$1" = "purge" ]; then
+  rm -rf /etc/deskaccess /var/lib/deskaccess
+  userdel deskaccess 2>/dev/null || true
+  groupdel deskaccess 2>/dev/null || true
+fi
+
+exit 0
