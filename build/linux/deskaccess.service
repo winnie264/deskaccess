@@ -1,0 +1,22 @@
+[Unit]
+Description=DeskAccess P2P Tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/deskaccess --service
+Restart=on-failure
+RestartSec=5
+User=deskaccess
+Group=deskaccess
+RuntimeDirectory=deskaccess
+RuntimeDirectoryMode=0750
+UMask=0007
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/etc/deskaccess /var/lib/deskaccess
+
+[Install]
+WantedBy=multi-user.target

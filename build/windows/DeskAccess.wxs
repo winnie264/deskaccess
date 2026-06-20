@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="DeskAccess"
+    Manufacturer="DeskAccess"
+    Version="$(var.Version)"
+    UpgradeCode="{6F338191-AC4C-4B99-A123-860F65216CB0}"
+    Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of DeskAccess is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="DeskAccessIcon" SourceFile="$(var.SourceDir)\DeskAccess.ico" />
+    <Property Id="ARPPRODUCTICON" Value="DeskAccessIcon" />
+
+    <Feature Id="MainFeature" Title="DeskAccess" Level="1">
+      <ComponentRef Id="AppExecutable" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+    <StandardDirectory Id="ProgramFilesFolder">
+      <Directory Id="INSTALLFOLDER" Name="DeskAccess" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="StartMenuFolder" Name="DeskAccess" />
+    </StandardDirectory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="AppExecutable" Guid="{C25634C4-F20B-4991-8A35-01FE5D48D4F5}">
+        <File
+          Id="DeskAccessExe"
+          Source="$(var.SourceDir)\DeskAccess.exe"
+          KeyPath="yes" />
+
+        <ServiceInstall
+          Id="DeskAccessServiceInstall"
+          Name="DeskAccess"
+          DisplayName="DeskAccess"
+          Description="Secure app-scoped remote access service"
+          Type="ownProcess"
+          Start="auto"
+          ErrorControl="normal"
+          Arguments="--service" />
+
+        <ServiceControl
+          Id="DeskAccessServiceControl"
+          Name="DeskAccess"
+          Start="install"
+          Stop="both"
+          Remove="uninstall"
+          Wait="yes" />
+
+        <RegistryKey Root="HKCR" Key="deskaccess">
+          <RegistryValue Type="string" Value="URL:DeskAccess Invite Link" />
+          <RegistryValue Name="URL Protocol" Type="string" Value="" />
+        </RegistryKey>
+        <RegistryKey Root="HKCR" Key="deskaccess\DefaultIcon">
+          <RegistryValue Type="string" Value="[#DeskAccessExe],0" />
+        </RegistryKey>
+        <RegistryKey Root="HKCR" Key="deskaccess\shell\open\command">
+          <RegistryValue Type="string" Value="&quot;[#DeskAccessExe]&quot; &quot;%1&quot;" />
+        </RegistryKey>
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="StartMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="{456F4955-EEAF-444F-8569-B5E67C9CE9F0}">
+        <Shortcut
+          Id="DeskAccessShortcut"
+          Name="DeskAccess"
+          Description="Open DeskAccess"
+          Target="[INSTALLFOLDER]DeskAccess.exe"
+          WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveStartMenuFolder" On="uninstall" />
+        <RegistryValue
+          Root="HKLM"
+          Key="Software\DeskAccess"
+          Name="StartMenuShortcut"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+  </Package>
+</Wix>

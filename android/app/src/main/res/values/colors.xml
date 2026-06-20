@@ -1,0 +1,8 @@
+<resources>
+    <color name="bg">#0F172A</color>
+    <color name="panel">#111827</color>
+    <color name="text">#F8FAFC</color>
+    <color name="muted">#94A3B8</color>
+    <color name="accent">#10B981</color>
+    <color name="danger">#F87171</color>
+</resources>
