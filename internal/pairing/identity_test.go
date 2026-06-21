@@ -36,3 +36,24 @@ func TestIdentityInfoIncludesTPMRootThumbprint(t *testing.T) {
 		t.Fatalf("thumbprint = %q, want %q", thumbprint, want)
 	}
 }
+
+func TestVerifyStoredIdentityRejectsChangedIdentity(t *testing.T) {
+	pub := []byte("software-public-key")
+	proof := &protocol.IdentityProof{
+		MachineID: "machine-a",
+		PublicKey: pub,
+	}
+
+	if err := verifyStoredIdentity(hex.EncodeToString(pub), "machine-a", proof); err != nil {
+		t.Fatalf("same identity rejected: %v", err)
+	}
+	if err := verifyStoredIdentity(hex.EncodeToString(pub), "machine-b", proof); err == nil {
+		t.Fatal("changed machine ID accepted")
+	}
+	if err := verifyStoredIdentity(hex.EncodeToString([]byte("other-key")), "machine-a", proof); err == nil {
+		t.Fatal("changed software public key accepted")
+	}
+	if err := verifyStoredIdentity("", "", proof); err == nil {
+		t.Fatal("missing stored identity accepted")
+	}
+}
