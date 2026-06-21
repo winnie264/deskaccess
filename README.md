@@ -126,7 +126,7 @@ Windows:
 go build -ldflags="-s -w -H=windowsgui" -o build\DeskAccess.exe ./cmd/deskaccess
 ```
 
-Raspberry Pi / Linux arm64:
+Raspberry Pi 5 / 64-bit Raspberry Pi OS:
 
 ```powershell
 $env:GOOS='linux'
@@ -134,6 +134,11 @@ $env:GOARCH='arm64'
 $env:CGO_ENABLED='0'
 go build -ldflags='-s -w -X main.version=0.1.0-pi' -o build\deskaccess-linux-arm64 ./cmd/deskaccess
 ```
+
+Package names:
+
+- `deskaccess-0.1.0-raspberry-pi-5-arm64.deb` for Raspberry Pi 5 and other Raspberry Pi boards running 64-bit Raspberry Pi OS.
+- `deskaccess-0.1.0-raspberry-pi-32bit-armv7.deb` for older 32-bit Raspberry Pi OS installs.
 
 Linux packages can be built with:
 

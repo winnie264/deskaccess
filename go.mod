@@ -2,6 +2,8 @@ module github.com/rdpanywhere/rdpanywhere
 
 go 1.26
 
+toolchain go1.26.3
+
 require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/anacrolix/dht/v2 v2.24.0

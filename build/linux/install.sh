@@ -19,8 +19,38 @@ install -m 755 "$BIN" /usr/local/bin/deskaccess
 # for a fresh dashboard URL through /run/deskaccess/DeskAccess.sock.
 groupadd -r deskaccess 2>/dev/null || true
 useradd -r -g deskaccess -s /bin/false -d /var/lib/deskaccess deskaccess 2>/dev/null || true
-if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
-  usermod -aG deskaccess "$SUDO_USER" || true
+add_user_to_group() {
+  user="$1"
+  if [ -n "$user" ] && [ "$user" != "root" ] && id "$user" >/dev/null 2>&1; then
+    usermod -aG deskaccess "$user" || true
+    return 0
+  fi
+  return 1
+}
+
+added_user=false
+if add_user_to_group "${SUDO_USER:-}"; then
+  added_user=true
+fi
+
+if [ "$added_user" = false ] && [ -n "${PKEXEC_UID:-}" ]; then
+  pk_user="$(getent passwd "$PKEXEC_UID" | cut -d: -f1)"
+  if add_user_to_group "$pk_user"; then
+    added_user=true
+  fi
+fi
+
+if [ "$added_user" = false ] && command -v logname >/dev/null 2>&1; then
+  if add_user_to_group "$(logname 2>/dev/null)"; then
+    added_user=true
+  fi
+fi
+
+if [ "$added_user" = false ]; then
+  awk -F: '$3 >= 1000 && $3 < 60000 && $7 !~ /(nologin|false)$/ {print $1}' /etc/passwd |
+    while IFS= read -r user; do
+      add_user_to_group "$user" || true
+    done
 fi
 
 # Create config dir
@@ -36,6 +66,7 @@ if [ -f deskaccess.png ]; then
 fi
 if [ -f deskaccess.desktop ]; then
   install -Dm 644 deskaccess.desktop /usr/share/applications/deskaccess.desktop
+  sed -i 's#^Exec=.*#Exec=sh -c '\''if [ -n "$1" ]; then exec /usr/local/bin/deskaccess "$1"; fi; url=$(/usr/local/bin/deskaccess 2>/dev/null | tail -n 1); exec xdg-open "$url"'\'' sh %u#' /usr/share/applications/deskaccess.desktop
 fi
 
 if command -v update-desktop-database >/dev/null 2>&1; then
@@ -51,6 +82,4 @@ systemctl start deskaccess
 
 echo "Done. DeskAccess running."
 echo "Run 'deskaccess' to print a fresh dashboard URL."
-if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
-  echo "If 'deskaccess' cannot reach the service yet, log out and back in so the deskaccess group membership is active."
-fi
+echo "If 'deskaccess' cannot reach the service yet, log out and back in so the deskaccess group membership is active."

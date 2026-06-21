@@ -1282,7 +1282,7 @@ async function doConnect() {
       body: JSON.stringify({ url })
     });
     if (r.ok) {
-      handleLaunchResult(await r.json());
+      await handleLaunchResult(await r.json());
       document.getElementById('url-input').value = '';
     } else {
       const msg = await responseError(r);
@@ -1314,7 +1314,7 @@ async function connectPaired(nodeId) {
     });
     if (r.ok) {
       const result = await r.json();
-      handleLaunchResult(result);
+      await handleLaunchResult(result);
       if (result.local_addr) {
         setConnectStatusText(nodeId, 'Connected · ' + result.local_addr);
       }
@@ -1414,7 +1414,7 @@ async function launchPaired(nodeId) {
     });
     if (!r.ok) throw new Error(await responseError(r));
     const result = await r.json();
-    handleLaunchResult(result);
+    await handleLaunchResult(result);
     if (result.local_addr) {
       setConnectStatusText(nodeId, 'Connected · ' + result.local_addr);
     }
@@ -1521,7 +1521,8 @@ function pollConnectStatusURL(statusURL, nodeId) {
   };
 }
 
-function handleLaunchResult(d) {
+async function handleLaunchResult(d) {
+  d = await launchFromUIIfAvailable(d || {});
   if (d.launched) {
     showToast(`${d.client} launched (${(d.protocol||'rdp').toUpperCase()})`);
   } else if (d.local_addr) {
@@ -1531,6 +1532,27 @@ function handleLaunchResult(d) {
     showToast(d.error, true);
   } else {
     showToast('Tunnel ready: ' + d.local_addr);
+  }
+}
+
+async function launchFromUIIfAvailable(d) {
+  if (!d || !d.local_addr || d.launched || d.native_launch_attempted) return d;
+  if (typeof window.deskaccessLaunchClient !== 'function') {
+    return Object.assign({}, d, {
+      native_launch_attempted: true,
+      launched: false,
+      error: 'Automatic launch is available only from the DeskAccess UI app. Copy the address and open Remote Desktop manually.'
+    });
+  }
+  try {
+    const result = await window.deskaccessLaunchClient(d.local_addr, d.protocol || 'rdp');
+    return Object.assign({}, d, result || {}, { native_launch_attempted: true });
+  } catch (err) {
+    return Object.assign({}, d, {
+      native_launch_attempted: true,
+      launched: false,
+      error: err && err.message ? err.message : String(err)
+    });
   }
 }
 
