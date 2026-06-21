@@ -631,6 +631,15 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 			}
 			return
 		}
+		if err := verifyStoredIdentity(trusted.PublicKey, trusted.MachineID, req.Identity); err != nil {
+			log.Warn("trusted reauth rejected — identity mismatch", "peer", shortPeer(remotePeerID), "err", err)
+			if err := protocol.WriteFrame(s, protocol.MsgPairResponse, protocol.PairResponse{
+				OK: false, Message: "trusted identity mismatch — create a fresh invite link",
+			}); err != nil {
+				log.Warn("write trusted identity rejection failed", "err", err, "peer", shortPeer(remotePeerID))
+			}
+			return
+		}
 		if trusted.Protocol != "" {
 			sessionProtocol = trusted.Protocol
 		}
@@ -646,6 +655,8 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 		m.cfg.AddTrustedPeer(config.TrustedPeer{
 			NodeID:            remotePeerID,
 			Label:             req.Label,
+			PublicKey:         identityProofPublicKeyHex(req.Identity),
+			MachineID:         identityProofMachineID(req.Identity),
 			Protocol:          sessionProtocol,
 			TargetPort:        sessionTargetPort,
 			IdentityBackend:   backend,
@@ -689,6 +700,8 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 			m.cfg.AddTrustedPeer(config.TrustedPeer{
 				NodeID:            remotePeerID,
 				Label:             req.Label,
+				PublicKey:         identityProofPublicKeyHex(req.Identity),
+				MachineID:         identityProofMachineID(req.Identity),
 				Protocol:          sessionProtocol,
 				TargetPort:        sessionTargetPort,
 				IdentityBackend:   backend,
@@ -998,6 +1011,7 @@ func (m *Manager) ConnectByURL(ctx context.Context, rawURL string) (*ConnectResu
 			Label:             resp.HostLabel,
 			NodeID:            peerID,
 			PublicKey:         hex.EncodeToString(t.PubKey[:]),
+			MachineID:         identityProofMachineID(resp.Identity),
 			Backend:           inviteBackend,
 			Protocol:          t.Protocol.String(),
 			TargetPort:        targetPort,
@@ -1013,6 +1027,8 @@ func (m *Manager) ConnectByURL(ctx context.Context, rawURL string) (*ConnectResu
 		m.cfg.AddTrustedPeer(config.TrustedPeer{
 			NodeID:            peerID,
 			Label:             resp.HostLabel,
+			PublicKey:         identityProofPublicKeyHex(resp.Identity),
+			MachineID:         identityProofMachineID(resp.Identity),
 			Protocol:          t.Protocol.String(),
 			TargetPort:        targetPort,
 			IdentityBackend:   backend,
@@ -1067,6 +1083,7 @@ func (m *Manager) ReauthPairedWithBackend(ctx context.Context, peerID string, pr
 	var publicKey string
 	var publicKeyBytes []byte
 	var irohTicket string
+	var storedMachineID string
 	storedProtocol := ""
 	storedTargetPort := 0
 	storedBackend := ""
@@ -1076,6 +1093,7 @@ func (m *Manager) ReauthPairedWithBackend(ctx context.Context, peerID string, pr
 			storedQUICAddrs = r.DirectQUICAddrs
 			publicKey = r.PublicKey
 			irohTicket = r.IrohTicket
+			storedMachineID = r.MachineID
 			storedProtocol = r.Protocol
 			storedTargetPort = r.TargetPort
 			storedBackend = r.Backend
@@ -1117,7 +1135,7 @@ func (m *Manager) ReauthPairedWithBackend(ctx context.Context, peerID string, pr
 			log.Warn("open iroh pairing stream for trusted reauth failed", "peer", shortPeer(peerID), "has_ticket", irohTicket != "", "err", err)
 			return nil, fmt.Errorf("cannot reach paired host via iroh (host may be offline, not running the iroh backend, or this saved iroh ticket is stale; create a fresh iroh pairing link from the host): %w", err)
 		}
-		return m.reauthOverStream(ctx, peerID, pairingStream, nil, irohTicket, nil, "", storedProtocol, storedTargetPort, backend, publicKey)
+		return m.reauthOverStream(ctx, peerID, pairingStream, nil, irohTicket, nil, "", storedProtocol, storedTargetPort, backend, publicKey, storedMachineID)
 	}
 
 	var btAddrs []string
@@ -1158,7 +1176,7 @@ func (m *Manager) ReauthPairedWithBackend(ctx context.Context, peerID string, pr
 			QUICEndpoint: directQUICEndpoint,
 		})
 		if err == nil {
-			return m.reauthOverStream(ctx, peerID, pairingStream, nil, "", directQUICAddrs, directQUICEndpoint, storedProtocol, storedTargetPort, backend, publicKey)
+			return m.reauthOverStream(ctx, peerID, pairingStream, nil, "", directQUICAddrs, directQUICEndpoint, storedProtocol, storedTargetPort, backend, publicKey, storedMachineID)
 		}
 		log.Debug("direct QUIC reauth failed, falling back to relay", "peer", peerID[:12], "err", err)
 	}
@@ -1192,10 +1210,10 @@ func (m *Manager) ReauthPairedWithBackend(ctx context.Context, peerID string, pr
 		}
 		return nil, fmt.Errorf("cannot reach paired host: %w", err)
 	}
-	return m.reauthOverStream(ctx, peerID, pairingStream, relayAddrs, "", nil, "", storedProtocol, storedTargetPort, backend, publicKey)
+	return m.reauthOverStream(ctx, peerID, pairingStream, relayAddrs, "", nil, "", storedProtocol, storedTargetPort, backend, publicKey, storedMachineID)
 }
 
-func (m *Manager) reauthOverStream(ctx context.Context, peerID string, pairingStream io.ReadWriteCloser, relayAddrs []string, irohTicket string, directQUICAddrs []string, quicEndpoint string, storedProtocol string, storedTargetPort int, networkBackend string, publicKey string) (*ConnectResult, error) {
+func (m *Manager) reauthOverStream(ctx context.Context, peerID string, pairingStream io.ReadWriteCloser, relayAddrs []string, irohTicket string, directQUICAddrs []string, quicEndpoint string, storedProtocol string, storedTargetPort int, networkBackend string, publicKey string, storedMachineID string) (*ConnectResult, error) {
 	defer pairingStream.Close()
 
 	// Send PairRequest with code=0 (trusted reauth — no invite code needed)
@@ -1242,6 +1260,9 @@ func (m *Manager) reauthOverStream(ctx context.Context, peerID string, pairingSt
 	if err := verifyIdentityProof(resp.Identity, resp.Attestation, "response", peerID, m.n.NodeID(), nil, nil, resp.SessionToken, "trusted"); err != nil {
 		return nil, fmt.Errorf("host identity proof rejected: %w", err)
 	}
+	if err := verifyStoredIdentity(publicKey, storedMachineID, resp.Identity); err != nil {
+		return nil, fmt.Errorf("host identity changed; create a fresh invite link: %w", err)
+	}
 	effectiveIrohTicket := irohTicket
 	if resp.IrohTicket != "" {
 		var publicKeyBytes []byte
@@ -1275,7 +1296,7 @@ func (m *Manager) reauthOverStream(ctx context.Context, peerID string, pairingSt
 		resultTargetPort = rendezvous.ParseProtocol(resultProtocol).DefaultPort()
 	}
 	savedRemote := false
-	if resp.Attestation != nil {
+	if resp.Identity != nil {
 		identityBackend, hardware, vendor, version, rootThumbprint := identityInfoFromAttestation(resp.Attestation)
 		m.cfg.AddRemote(config.RemoteConfig{
 			Label:             resp.HostLabel,
@@ -1283,6 +1304,7 @@ func (m *Manager) reauthOverStream(ctx context.Context, peerID string, pairingSt
 			Backend:           networkBackend,
 			Protocol:          resultProtocol,
 			TargetPort:        resultTargetPort,
+			MachineID:         identityProofMachineID(resp.Identity),
 			RelayAddrs:        relayAddrs,
 			IrohTicket:        effectiveIrohTicket,
 			DirectQUICAddrs:   directQUICAddrs,
@@ -1295,6 +1317,8 @@ func (m *Manager) reauthOverStream(ctx context.Context, peerID string, pairingSt
 		m.cfg.AddTrustedPeer(config.TrustedPeer{
 			NodeID:            peerID,
 			Label:             resp.HostLabel,
+			PublicKey:         identityProofPublicKeyHex(resp.Identity),
+			MachineID:         identityProofMachineID(resp.Identity),
 			Protocol:          resultProtocol,
 			TargetPort:        resultTargetPort,
 			IdentityBackend:   identityBackend,
@@ -1759,6 +1783,45 @@ func verifyIdentityProof(proof *protocol.IdentityProof, att *protocol.TPMAttesta
 	default:
 		return fmt.Errorf("unsupported identity proof backend %q", proof.Backend)
 	}
+}
+
+func verifyStoredIdentity(storedPublicKey string, storedMachineID string, proof *protocol.IdentityProof) error {
+	if proof == nil {
+		return fmt.Errorf("missing identity proof")
+	}
+	storedMachineID = strings.TrimSpace(storedMachineID)
+	storedPublicKey = strings.TrimSpace(storedPublicKey)
+	if storedMachineID == "" && storedPublicKey == "" {
+		return fmt.Errorf("no stored identity for paired machine")
+	}
+	if storedMachineID != "" {
+		if proof.MachineID == "" {
+			return fmt.Errorf("peer did not present a machine ID")
+		}
+		if !strings.EqualFold(storedMachineID, proof.MachineID) {
+			return fmt.Errorf("machine ID mismatch")
+		}
+	}
+	if storedPublicKey != "" && len(proof.PublicKey) > 0 {
+		if !strings.EqualFold(storedPublicKey, hex.EncodeToString(proof.PublicKey)) {
+			return fmt.Errorf("software public key mismatch")
+		}
+	}
+	return nil
+}
+
+func identityProofMachineID(proof *protocol.IdentityProof) string {
+	if proof == nil {
+		return ""
+	}
+	return strings.TrimSpace(proof.MachineID)
+}
+
+func identityProofPublicKeyHex(proof *protocol.IdentityProof) string {
+	if proof == nil || len(proof.PublicKey) == 0 {
+		return ""
+	}
+	return hex.EncodeToString(proof.PublicKey)
 }
 
 func identityProofMessage(role string, signerPeer string, verifierPeer string, inviteID []byte, inviteProof []byte, sessionToken []byte, mode string, window int64) []byte {

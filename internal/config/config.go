@@ -101,6 +101,7 @@ type RemoteConfig struct {
 	Label             string    `toml:"label"`
 	NodeID            string    `toml:"node_id"`
 	PublicKey         string    `toml:"public_key"`
+	MachineID         string    `toml:"machine_id"`
 	Backend           string    `toml:"backend"`
 	Protocol          string    `toml:"protocol"`
 	TargetPort        int       `toml:"target_port"`
@@ -119,6 +120,8 @@ type RemoteConfig struct {
 type TrustedPeer struct {
 	NodeID            string    `toml:"node_id"`
 	Label             string    `toml:"label"`
+	PublicKey         string    `toml:"public_key"`
+	MachineID         string    `toml:"machine_id"`
 	Protocol          string    `toml:"protocol"`
 	TargetPort        int       `toml:"target_port"`
 	IdentityBackend   string    `toml:"identity_backend"`
@@ -279,6 +282,9 @@ func (c *Config) AddRemote(r RemoteConfig) {
 			if r.PublicKey != "" {
 				c.Remotes[i].PublicKey = r.PublicKey
 			}
+			if r.MachineID != "" {
+				c.Remotes[i].MachineID = r.MachineID
+			}
 			if r.Backend != "" {
 				c.Remotes[i].Backend = r.Backend
 			}
@@ -331,6 +337,9 @@ func sameTrustedMachine(a, b TrustedPeer) bool {
 	if a.NodeID != "" && b.NodeID != "" && a.NodeID == b.NodeID {
 		return true
 	}
+	if a.MachineID != "" && b.MachineID != "" && a.MachineID == b.MachineID {
+		return true
+	}
 	if a.TPMRootThumbprint != "" && b.TPMRootThumbprint != "" && a.TPMRootThumbprint == b.TPMRootThumbprint {
 		return true
 	}
@@ -343,6 +352,12 @@ func mergeTrustedPeer(dst *TrustedPeer, src TrustedPeer) {
 	}
 	if src.Label != "" {
 		dst.Label = src.Label
+	}
+	if src.PublicKey != "" {
+		dst.PublicKey = src.PublicKey
+	}
+	if src.MachineID != "" {
+		dst.MachineID = src.MachineID
 	}
 	if src.Protocol != "" {
 		dst.Protocol = src.Protocol
