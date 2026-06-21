@@ -12,6 +12,14 @@ DeskAccess is an app-scoped remote access tool for reaching selected services on
 
 Instead of installing a full VPN adapter and routing broad network traffic, DeskAccess creates access only for the service you explicitly invite or pair.
 
+## Demo
+
+Create an invite, open it on another machine, connect, and launch RDP:
+
+<p align="center">
+  <img src="docs/demo.gif" alt="DeskAccess invite, connect, and RDP launch demo" width="820">
+</p>
+
 ## Why DeskAccess
 
 Traditional VPN tools often give broad network reach once a device is connected. DeskAccess is designed for a narrower workflow: share access to one selected service on one machine, then keep the rest of the network out of scope.
