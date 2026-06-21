@@ -891,23 +891,16 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.setConnectStatus(connectKey, "ready", "Local tunnel ready", proto, "", localAddr, nil, false)
-	s.setConnectStatus(connectKey, "launching", "Launching "+clientLabel(proto), proto, "", localAddr, nil, false)
-	launch := tunnel.LaunchClient(localAddr, proto)
-	if launch.Launched {
-		s.setConnectStatus(connectKey, "launched", launch.Client+" launched", proto, "", localAddr, nil, true)
-	} else if launch.Error != "" {
-		s.setConnectStatus(connectKey, "manual", "Tunnel ready, manual launch needed", proto, "", localAddr, errors.New(launch.Error), true)
-	} else {
-		s.setConnectStatus(connectKey, "ready", "Tunnel ready at "+localAddr, proto, "", localAddr, nil, true)
-	}
+	s.setConnectStatus(connectKey, "ready", "Local tunnel ready", proto, "", localAddr, nil, true)
 	respond(w, map[string]any{
-		"local_addr": localAddr,
-		"launched":   launch.Launched,
-		"client":     launch.Client,
-		"protocol":   proto,
-		"error":      launch.Error,
-		"active":     true,
+		"local_addr":      localAddr,
+		"launched":        false,
+		"client":          "",
+		"protocol":        proto,
+		"error":           "",
+		"active":          true,
+		"launch_from_ui":  true,
+		"manual_fallback": true,
 	})
 }
 
@@ -991,21 +984,16 @@ func (s *Server) handleLaunch(w http.ResponseWriter, r *http.Request) {
 		"protocol", proto,
 		"local_addr", session.LocalAddr,
 		"remote_addr", r.RemoteAddr)
-	launch := tunnel.LaunchClient(session.LocalAddr, proto)
-	if launch.Launched {
-		s.setConnectStatus(key, "launched", launch.Client+" launched", proto, session.Peer, session.LocalAddr, nil, true)
-	} else if launch.Error != "" {
-		s.setConnectStatus(key, "manual", "Tunnel ready, manual launch needed", proto, session.Peer, session.LocalAddr, errors.New(launch.Error), true)
-	} else {
-		s.setConnectStatus(key, "ready", "Tunnel ready at "+session.LocalAddr, proto, session.Peer, session.LocalAddr, nil, true)
-	}
+	s.setConnectStatus(key, "ready", "Tunnel ready at "+session.LocalAddr, proto, session.Peer, session.LocalAddr, nil, true)
 	respond(w, map[string]any{
-		"local_addr": session.LocalAddr,
-		"launched":   launch.Launched,
-		"client":     launch.Client,
-		"protocol":   proto,
-		"error":      launch.Error,
-		"active":     true,
+		"local_addr":      session.LocalAddr,
+		"launched":        false,
+		"client":          "",
+		"protocol":        proto,
+		"error":           "",
+		"active":          true,
+		"launch_from_ui":  true,
+		"manual_fallback": true,
 	})
 }
 
@@ -1049,17 +1037,6 @@ func tunnelStatusMessage(result *pairing.ConnectResult) string {
 		return "Opening iroh tunnel"
 	default:
 		return "Opening libp2p tunnel"
-	}
-}
-
-func clientLabel(proto string) string {
-	switch proto {
-	case "vnc":
-		return "VNC client"
-	case "ssh":
-		return "SSH client"
-	default:
-		return "RDP client"
 	}
 }
 

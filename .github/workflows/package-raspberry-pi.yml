@@ -24,11 +24,11 @@ jobs:
       matrix:
         include:
           - target: linux-arm64
-            artifact: deskaccess-raspberry-pi-arm64
-            deb_arch: arm64
+            artifact: deskaccess-raspberry-pi-5-arm64
+            package_slug: raspberry-pi-5-arm64
           - target: linux-armv7
-            artifact: deskaccess-raspberry-pi-armv7
-            deb_arch: armhf
+            artifact: deskaccess-raspberry-pi-32bit-armv7
+            package_slug: raspberry-pi-32bit-armv7
 
     steps:
       - name: Checkout
@@ -65,8 +65,8 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: |
-            dist/packages/deskaccess-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz
-            dist/packages/deskaccess_${{ steps.version.outputs.version }}_${{ matrix.deb_arch }}.deb
+            dist/packages/deskaccess-${{ steps.version.outputs.version }}-${{ matrix.package_slug }}.tar.gz
+            dist/packages/deskaccess-${{ steps.version.outputs.version }}-${{ matrix.package_slug }}.deb
             dist/packages/SHA256SUMS.txt
           if-no-files-found: error
 

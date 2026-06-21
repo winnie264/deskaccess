@@ -94,7 +94,11 @@ try {
   }
   Invoke-Checked $wix $wixArgs
 
-  Get-ChildItem $packages -File | Get-FileHash -Algorithm SHA256 |
+  Remove-Item -Force (Join-Path $packages "DeskAccess-$Version-windows-amd64.wixpdb") -ErrorAction SilentlyContinue
+
+  Get-ChildItem $packages -File |
+    Where-Object { $_.Extension -in ".zip", ".msi" } |
+    Get-FileHash -Algorithm SHA256 |
     ForEach-Object { "$($_.Hash)  $([IO.Path]::GetFileName($_.Path))" } |
     Set-Content (Join-Path $packages "SHA256SUMS.txt")
 

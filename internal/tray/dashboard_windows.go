@@ -3,12 +3,14 @@
 package tray
 
 import (
+	"log/slog"
 	"os"
 	"runtime"
 	"syscall"
 	"unsafe"
 
 	webview2 "github.com/jchv/go-webview2"
+	"github.com/rdpanywhere/rdpanywhere/internal/tunnel"
 )
 
 const swMaximize = 3
@@ -63,6 +65,7 @@ func showDashboard(url string, closeToTray bool) {
 		return
 	}
 	defer w.Destroy()
+	bindLaunchClient(w)
 	w.SetTitle("DeskAccess")
 	w.SetSize(1200, 820, webview2.HintNone)
 	setWindowIcon(w.Window())
@@ -72,6 +75,26 @@ func showDashboard(url string, closeToTray bool) {
 	maximizeWindow(w.Window())
 	w.Navigate(url)
 	w.Run()
+}
+
+func bindLaunchClient(w webview2.WebView) {
+	_ = w.Bind("deskaccessLaunchClient", func(localAddr string, protocol string) (map[string]any, error) {
+		slog.Info("UI launch requested", "component", "tray", "protocol", protocol, "local_addr", localAddr)
+		launch := tunnel.LaunchClient(localAddr, protocol)
+		if launch.Launched {
+			slog.Info("UI launch succeeded", "component", "tray", "protocol", protocol, "client", launch.Client, "local_addr", localAddr)
+		} else if launch.Error != "" {
+			slog.Warn("UI launch failed", "component", "tray", "protocol", protocol, "local_addr", localAddr, "err", launch.Error)
+		}
+		return map[string]any{
+			"local_addr": localAddr,
+			"launched":   launch.Launched,
+			"client":     launch.Client,
+			"protocol":   protocol,
+			"error":      launch.Error,
+			"active":     true,
+		}, nil
+	})
 }
 
 func installCloseToTrayHandler(hwnd unsafe.Pointer) {
