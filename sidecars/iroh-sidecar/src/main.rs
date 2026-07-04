@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use anyhow::{anyhow, bail, Context, Result};
 use axum::{
     extract::State,
@@ -117,6 +119,7 @@ struct CallbackMeta {
 async fn main() {
     if let Err(err) = run().await {
         error!(err = ?err, "deskaccess iroh sidecar exiting with error");
+        #[cfg(not(windows))]
         eprintln!("deskaccess iroh sidecar exiting with error: {err:?}");
         std::process::exit(1);
     }
@@ -324,6 +327,7 @@ fn parse_options() -> Result<Options> {
                 ));
             }
             "--help" | "-h" => {
+                #[cfg(not(windows))]
                 println!("deskaccess-iroh-sidecar [--listen 127.0.0.1:17389] [--ready-file path]");
                 std::process::exit(0);
             }

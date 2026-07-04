@@ -53,6 +53,7 @@ $shortcutPath = Join-Path $shortcutDir "DeskAccess.lnk"
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $targetExe
+$shortcut.Arguments = "--ui"
 $shortcut.WorkingDirectory = $InstallDir
 $shortcut.IconLocation = $targetExe
 $shortcut.Save()

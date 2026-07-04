@@ -14,6 +14,20 @@
     <Icon Id="DeskAccessIcon" SourceFile="$(var.SourceDir)\DeskAccess.ico" />
     <Property Id="ARPPRODUCTICON" Value="DeskAccessIcon" />
 
+    <CustomAction
+      Id="LaunchDeskAccessAfterInstall"
+      FileRef="DeskAccessExe"
+      ExeCommand="--ui"
+      Execute="immediate"
+      Return="asyncNoWait" />
+
+    <InstallExecuteSequence>
+      <Custom
+        Action="LaunchDeskAccessAfterInstall"
+        After="InstallFinalize"
+        Condition="NOT Installed AND NOT REMOVE" />
+    </InstallExecuteSequence>
+
     <Feature Id="MainFeature" Title="DeskAccess" Level="1">
       <ComponentRef Id="AppExecutable" />
       <ComponentRef Id="IrohSidecarExecutable" />
@@ -82,6 +96,7 @@
           Name="DeskAccess"
           Description="Open DeskAccess"
           Target="[INSTALLFOLDER]DeskAccess.exe"
+          Arguments="--ui"
           Icon="DeskAccessIcon"
           WorkingDirectory="INSTALLFOLDER" />
         <RemoveFolder Id="RemoveStartMenuFolder" On="uninstall" />

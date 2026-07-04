@@ -212,10 +212,18 @@ func Wrapf(msg string, args ...any) error {
 func LogFile() string {
 	switch runtime.GOOS {
 	case "windows":
-		return filepath.Join(os.Getenv("APPDATA"), "DeskAccess", "DeskAccess.log")
+		if dir := os.Getenv("ProgramData"); dir != "" {
+			return filepath.Join(dir, "DeskAccess", "DeskAccess.log")
+		}
+		if dir := os.Getenv("APPDATA"); dir != "" {
+			return filepath.Join(dir, "DeskAccess", "DeskAccess.log")
+		}
+		if dir := os.Getenv("LOCALAPPDATA"); dir != "" {
+			return filepath.Join(dir, "DeskAccess", "DeskAccess.log")
+		}
+		return filepath.Join("DeskAccess.log")
 	default:
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, ".local", "share", "DeskAccess", "DeskAccess.log")
+		return filepath.Join(string(filepath.Separator), "var", "lib", "deskaccess", "DeskAccess.log")
 	}
 }
 
@@ -253,7 +261,41 @@ func writeBootstrapLine(f *os.File, path string, debug bool) {
 }
 
 func logFileCandidates(preferred string) []string {
-	return []string{preferred}
+	var candidates []string
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		for _, existing := range candidates {
+			if existing == path {
+				return
+			}
+		}
+		candidates = append(candidates, path)
+	}
+	add(preferred)
+	if runtime.GOOS == "windows" {
+		if dir := os.Getenv("ProgramData"); dir != "" {
+			add(filepath.Join(dir, "DeskAccess", "DeskAccess.log"))
+		}
+		if dir := os.Getenv("APPDATA"); dir != "" {
+			add(filepath.Join(dir, "DeskAccess", "DeskAccess.log"))
+		}
+		if dir := os.Getenv("LOCALAPPDATA"); dir != "" {
+			add(filepath.Join(dir, "DeskAccess", "DeskAccess.log"))
+		}
+	} else {
+		add(filepath.Join(string(filepath.Separator), "var", "lib", "deskaccess", "DeskAccess.log"))
+		if stateHome := os.Getenv("XDG_STATE_HOME"); stateHome != "" {
+			add(filepath.Join(stateHome, "DeskAccess", "DeskAccess.log"))
+		}
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			add(filepath.Join(home, ".local", "state", "DeskAccess", "DeskAccess.log"))
+			add(filepath.Join(home, ".local", "share", "DeskAccess", "DeskAccess.log"))
+		}
+	}
+	return candidates
 }
 
 // CurrentLogFile returns the active log file path, if file logging is enabled.

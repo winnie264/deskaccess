@@ -14,7 +14,6 @@ rm -f /usr/local/bin/deskaccess
 rm -f /usr/local/bin/deskaccess-iroh-sidecar
 rm -f /usr/share/applications/deskaccess.desktop
 rm -f /usr/share/icons/hicolor/256x256/apps/deskaccess.png
-rm -f /etc/sysctl.d/99-deskaccess-quic.conf
 rm -f /run/deskaccess/DeskAccess.sock 2>/dev/null || true
 rmdir /run/deskaccess 2>/dev/null || true
 

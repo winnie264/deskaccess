@@ -24,7 +24,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -44,11 +43,6 @@ var tlog = logger.For(logger.CompTunnel)
 const tunnelResponseTimeout = 15 * time.Second
 const defaultTunnelOpenTimeout = 30 * time.Second
 const irohTunnelOpenTimeout = 2 * time.Minute
-const bridgeProgressEvery = 16 * 1024 * 1024
-const bridgeInitialReadLogs = 3
-const bridgeInitialWriteLogs = 3
-const bridgeInitialIdleLogAfter = 15 * time.Second
-const bridgeIdleLogInterval = 60 * time.Second
 const bridgeSlowWriteThreshold = 2 * time.Second
 const bridgeWriteBufferSize = 32 * 1024
 
@@ -415,14 +409,28 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remote string, transp
 	grant, err := m.sessions.VerifyGrant(hello.SessionToken)
 	m.mu.Unlock()
 	if err != nil {
-		tlog.Warn("session token rejected", "peer", shortPeer(requestPeerID), "transport_peer", shortPeer(remote), "err", err)
+		tlog.Warn("session token rejected",
+			"audit_event", "tunnel_session_token_rejected",
+			"peer", shortPeer(requestPeerID),
+			"transport_peer", shortPeer(remote),
+			"stream_id", hello.StreamID,
+			"target_host", connectTargetHost(hello.TargetHost),
+			"target_port", hello.TargetPort,
+			"transport_backend", transportBackend,
+			"err", err)
 		protocol.WriteFrame(s, protocol.MsgTunnelError, protocol.TunnelError{Reason: err.Error()})
 		s.Close()
 		return
 	}
 	if grant.PeerID != requestPeerID {
 		tlog.Warn("session token peer mismatch",
-			"issued_for", shortPeer(grant.PeerID), "used_by", shortPeer(requestPeerID), "transport_peer", shortPeer(remote))
+			"audit_event", "tunnel_session_token_rejected",
+			"reason", "peer_mismatch",
+			"issued_for", shortPeer(grant.PeerID),
+			"used_by", shortPeer(requestPeerID),
+			"transport_peer", shortPeer(remote),
+			"stream_id", hello.StreamID,
+			"transport_backend", transportBackend)
 		protocol.WriteFrame(s, protocol.MsgTunnelError, protocol.TunnelError{
 			Reason: "session token was not issued for this peer",
 		})
@@ -435,10 +443,14 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remote string, transp
 	}
 	if hello.TargetPort > 0 && hello.TargetPort != grantedPort {
 		tlog.Warn("CONNECT target port rejected",
+			"audit_event", "tunnel_session_token_rejected",
+			"reason", "target_port_mismatch",
 			"peer", shortPeer(requestPeerID),
+			"transport_peer", shortPeer(remote),
 			"requested_port", hello.TargetPort,
 			"granted_port", grantedPort,
-			"stream_id", hello.StreamID)
+			"stream_id", hello.StreamID,
+			"transport_backend", transportBackend)
 		protocol.WriteFrame(s, protocol.MsgTunnelError, protocol.TunnelError{
 			Reason: fmt.Sprintf("target port %d was not granted by the invite", hello.TargetPort),
 		})
@@ -448,16 +460,29 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remote string, transp
 	targetAddr := m.targetAddrForPort(grantedPort)
 	if strings.TrimSpace(hello.TargetHost) != "" && !isLoopbackHost(hello.TargetHost) {
 		tlog.Warn("non-loopback CONNECT target rejected",
+			"audit_event", "tunnel_session_token_rejected",
+			"reason", "non_loopback_target",
 			"peer", shortPeer(requestPeerID),
+			"transport_peer", shortPeer(remote),
 			"target_host", hello.TargetHost,
 			"target_port", hello.TargetPort,
-			"stream_id", hello.StreamID)
+			"stream_id", hello.StreamID,
+			"transport_backend", transportBackend)
 		protocol.WriteFrame(s, protocol.MsgTunnelError, protocol.TunnelError{
 			Reason: "only loopback targets are allowed",
 		})
 		s.Close()
 		return
 	}
+	tlog.Info("security audit: tunnel session authorized",
+		"audit_event", "tunnel_session_authorized",
+		"peer", shortPeer(requestPeerID),
+		"transport_peer", shortPeer(remote),
+		"stream_id", hello.StreamID,
+		"target_host", connectTargetHost(hello.TargetHost),
+		"requested_port", hello.TargetPort,
+		"granted_port", grantedPort,
+		"transport_backend", transportBackend)
 	tlog.Info("CONNECT request accepted",
 		"peer", shortPeer(requestPeerID),
 		"transport_peer", shortPeer(remote),
@@ -1133,47 +1158,14 @@ func bridgeLogged(side, peer, streamID, targetAddr string, a, b io.ReadWriteClos
 }
 
 func copyWithProgress(dst io.Writer, src io.Reader, side, peer, streamID, targetAddr, direction string) (int64, error) {
-	if side != "" {
-		logBridgeProgress("waiting for tunnel bytes", side, peer, streamID, targetAddr, direction, 0)
-	}
 	buf := make([]byte, bridgeWriteBufferSize)
 	var total int64
-	var nextProgress int64 = bridgeProgressEvery
-	readLogs := 0
-	writeLogs := 0
-	var totalBytes atomic.Int64
-	var lastActivityUnixNano atomic.Int64
-	var writeStartedUnixNano atomic.Int64
-	lastActivityUnixNano.Store(time.Now().UnixNano())
-	var idleStop chan struct{}
-	if side != "" {
-		idleStop = make(chan struct{})
-		go bridgeIdleMonitor(side, peer, streamID, targetAddr, direction, &totalBytes, &lastActivityUnixNano, &writeStartedUnixNano, idleStop)
-		defer close(idleStop)
-	}
 	for {
 		nr, er := src.Read(buf)
 		if nr > 0 {
-			idleBeforeRead := time.Since(time.Unix(0, lastActivityUnixNano.Load()))
-			if side != "" && (readLogs < bridgeInitialReadLogs || idleBeforeRead >= bridgeIdleLogInterval) {
-				logBridgeRead(side, peer, streamID, targetAddr, direction, int64(nr))
-				readLogs++
-			}
-			writeStartedUnixNano.Store(time.Now().UnixNano())
 			nw, ew := writeFullWithDeadline(dst, buf[:nr], side, peer, streamID, targetAddr, direction)
-			writeStartedUnixNano.Store(0)
 			if nw > 0 {
 				total += int64(nw)
-				totalBytes.Store(total)
-				lastActivityUnixNano.Store(time.Now().UnixNano())
-				if side != "" && (writeLogs < bridgeInitialWriteLogs || idleBeforeRead >= bridgeIdleLogInterval) {
-					logBridgeWrite(side, peer, streamID, targetAddr, direction, int64(nw), total)
-					writeLogs++
-				}
-				if side != "" && total >= nextProgress {
-					logBridgeProgress("tunnel bytes progressing", side, peer, streamID, targetAddr, direction, total)
-					nextProgress += bridgeProgressEvery
-				}
 			}
 			if ew != nil {
 				return total, ew
@@ -1184,54 +1176,6 @@ func copyWithProgress(dst io.Writer, src io.Reader, side, peer, streamID, target
 		}
 		if er != nil {
 			return total, er
-		}
-	}
-}
-
-func logBridgeRead(side, peer, streamID, targetAddr, direction string, bytes int64) {
-	msg := "data read from tunnel stream"
-	if side == "client" && direction == "local_to_remote" {
-		msg = "data read from local client"
-	} else if side == "client" && direction == "remote_to_local" {
-		msg = "data read from remote tunnel"
-	} else if side == "host" && direction == "remote_to_service" {
-		msg = "data read from remote tunnel"
-	} else if side == "host" && direction == "service_to_remote" {
-		msg = "data read from host service"
-	}
-	args := []any{
-		"side", side,
-		"peer", peer,
-		"stream_id", streamID,
-		"direction", direction,
-		"bytes", bytes,
-	}
-	if targetAddr != "" {
-		args = appendBridgeEndpointArgs(args, side, targetAddr)
-	}
-	tlog.Debug(msg, args...)
-}
-
-func bridgeIdleMonitor(side, peer, streamID, targetAddr, direction string, totalBytes *atomic.Int64, lastActivityUnixNano *atomic.Int64, writeStartedUnixNano *atomic.Int64, stop <-chan struct{}) {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	nextIdleLogAfter := bridgeInitialIdleLogAfter
-	for {
-		select {
-		case <-stop:
-			return
-		case <-ticker.C:
-			last := time.Unix(0, lastActivityUnixNano.Load())
-			idleFor := time.Since(last)
-			if idleFor >= nextIdleLogAfter {
-				writeStarted := writeStartedUnixNano.Load()
-				writeFor := time.Duration(0)
-				if writeStarted > 0 {
-					writeFor = time.Since(time.Unix(0, writeStarted))
-				}
-				logBridgeIdle(side, peer, streamID, targetAddr, direction, totalBytes.Load(), idleFor, writeFor)
-				nextIdleLogAfter = idleFor + bridgeIdleLogInterval
-			}
 		}
 	}
 }
@@ -1274,20 +1218,6 @@ func writeChunkSize(dst io.Writer) int {
 	return 0
 }
 
-func logBridgeProgress(msg, side, peer, streamID, targetAddr, direction string, bytes int64) {
-	args := []any{
-		"side", side,
-		"peer", peer,
-		"stream_id", streamID,
-		"direction", direction,
-		"bytes", bytes,
-	}
-	if targetAddr != "" {
-		args = appendBridgeEndpointArgs(args, side, targetAddr)
-	}
-	tlog.Debug(msg, args...)
-}
-
 func logBridgeSlowWrite(side, peer, streamID, targetAddr, direction string, bytes int, attempted int, duration time.Duration, err error) {
 	args := []any{
 		"side", side,
@@ -1306,54 +1236,6 @@ func logBridgeSlowWrite(side, peer, streamID, targetAddr, direction string, byte
 		return
 	}
 	tlog.Warn("tunnel write slow", args...)
-}
-
-func logBridgeIdle(side, peer, streamID, targetAddr, direction string, totalBytes int64, idleFor time.Duration, writeFor time.Duration) {
-	state := "waiting_for_read"
-	if writeFor > 0 {
-		state = "writing"
-	}
-	args := []any{
-		"side", side,
-		"peer", peer,
-		"stream_id", streamID,
-		"direction", direction,
-		"total_bytes", totalBytes,
-		"idle_for", idleFor.Round(time.Second).String(),
-		"state", state,
-	}
-	if writeFor > 0 {
-		args = append(args, "write_for", writeFor.Round(time.Second).String())
-	}
-	if targetAddr != "" {
-		args = appendBridgeEndpointArgs(args, side, targetAddr)
-	}
-	tlog.Info("tunnel bytes idle", args...)
-}
-
-func logBridgeWrite(side, peer, streamID, targetAddr, direction string, bytes int64, total int64) {
-	msg := "tunnel bytes started"
-	if side == "client" && direction == "local_to_remote" {
-		msg = "data written from client to tunnel"
-	} else if side == "host" && direction == "remote_to_service" {
-		msg = "data written from tunnel to host service"
-	} else if side == "client" && direction == "remote_to_local" {
-		msg = "data written from tunnel to local client"
-	} else if side == "host" && direction == "service_to_remote" {
-		msg = "data written from host service to tunnel"
-	}
-	args := []any{
-		"side", side,
-		"peer", peer,
-		"stream_id", streamID,
-		"direction", direction,
-		"bytes", bytes,
-		"total_bytes", total,
-	}
-	if targetAddr != "" {
-		args = appendBridgeEndpointArgs(args, side, targetAddr)
-	}
-	tlog.Info(msg, args...)
 }
 
 func appendBridgeEndpointArgs(args []any, side string, endpointAddr string) []any {
@@ -1416,29 +1298,22 @@ func logBridgeCopy(side, peer, streamID, targetAddr, direction string, bytes int
 		"peer", peer,
 		"stream_id", streamID,
 		"direction", direction,
-		"bytes", bytes,
 	}
 	if targetAddr != "" {
 		args = appendBridgeEndpointArgs(args, side, targetAddr)
 	}
 	if err != nil && !errors.Is(err, io.EOF) && !isTunnelClosedError(err) {
-		tlog.Warn("tunnel copy ended with error", append(args, "err", err)...)
+		tlog.Warn("tunnel copy ended with error", append(args, "bytes", bytes, "err", err)...)
 		return
 	}
 	if cause := bridgeCloseCause(err); cause != "" {
 		args = append(args, "close_cause", cause)
 	}
-	msg := "tunnel copy ended"
-	if side == "host" && direction == "remote_to_service" {
-		msg = "data written to local service"
-	} else if side == "host" && direction == "service_to_remote" {
-		msg = "data read from local service"
-	}
 	if side == "host" && bytes == 0 {
 		tlog.Warn("tunnel side closed before data transfer", args...)
 		return
 	}
-	tlog.Info(msg, args...)
+	tlog.Info("tunnel copy ended", args...)
 }
 
 func bridgeCloseCause(err error) string {

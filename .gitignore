@@ -19,6 +19,7 @@ build/rdpanywhere-*
 build/DeskAccess.exe
 build/*.exe~
 cmd/deskaccess/__debug_bin*
+sidecars/**/target/
 
 # Go build and test artifacts
 .cache/
