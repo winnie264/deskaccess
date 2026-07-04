@@ -17,7 +17,7 @@ import (
 	"github.com/rdpanywhere/rdpanywhere/internal/btdht"
 	"github.com/rdpanywhere/rdpanywhere/internal/config"
 	"github.com/rdpanywhere/rdpanywhere/internal/ipc"
-	"github.com/rdpanywhere/rdpanywhere/internal/irohnet"
+	"github.com/rdpanywhere/rdpanywhere/internal/irohsidecar"
 	"github.com/rdpanywhere/rdpanywhere/internal/node"
 	"github.com/rdpanywhere/rdpanywhere/internal/pairing"
 	"github.com/rdpanywhere/rdpanywhere/internal/quicnet"
@@ -41,6 +41,7 @@ func main() {
 		svcInstall   = flag.Bool("install", false, "Install as system service")
 		svcUninstall = flag.Bool("uninstall", false, "Uninstall system service")
 		runSvc       = flag.Bool("service", false, "Run as system service (called by OS)")
+		standalone   = flag.Bool("standalone", false, "Run backend and web UI in this process")
 		connectURL   = flag.String("connect", "", "Connect to a remote via deskaccess:// URL")
 		generate     = flag.Bool("generate", false, "Generate a pairing invite via running service")
 		protocol     = flag.String("protocol", "", "Invite protocol: rdp, ssh, vnc, or custom")
@@ -83,6 +84,9 @@ func main() {
 		if err := service.RunService(); err != nil {
 			log.Fatalf("run service: %v", err)
 		}
+
+	case *standalone:
+		runStandalone()
 
 	case *connectURL != "":
 		// Client mode: connect to remote via invite URL
@@ -198,6 +202,7 @@ func openDashboardFromService() bool {
 func runTray() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var stackDone chan struct{}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -206,12 +211,18 @@ func runTray() {
 	if _, err := ipc.Query(ipc.Request{Cmd: "status"}); err != nil {
 		// Daemon not found — start it in-process (debug / no-service-installed mode).
 		log.Println("daemon not reachable via IPC — starting in-process")
-		go service.RunStack(ctx)
+		stackDone = make(chan struct{})
+		go func() {
+			defer close(stackDone)
+			service.RunStack(ctx)
+		}()
 		waitForDaemon(ctx)
 	}
 
 	t := tray.New(ctx)
 	t.Run() // blocks on main thread (required by OS)
+	cancel()
+	waitForStackShutdown(stackDone)
 }
 
 // waitForDaemon polls the IPC socket until the daemon is ready or ctx is done.
@@ -241,6 +252,50 @@ func runDaemon() {
 	go func() { <-sig; cancel() }()
 
 	service.RunStack(ctx)
+}
+
+func runStandalone() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() { <-sig; cancel() }()
+
+	stackDone := make(chan struct{})
+	go func() {
+		defer close(stackDone)
+		service.RunStack(ctx)
+	}()
+	waitForDaemon(ctx)
+
+	st, err := ipc.Query(ipc.Request{Cmd: "status"})
+	if err != nil {
+		log.Fatalf("standalone backend started but dashboard is not reachable: %v", err)
+	}
+	if st == nil || st.Error != "" || st.WebuiURL == "" {
+		if st != nil && st.Error != "" {
+			log.Fatal(st.Error)
+		}
+		log.Fatal("standalone backend did not return a dashboard URL")
+	}
+	fmt.Println(st.WebuiURL)
+	if tray.HasDesktopDisplay() {
+		tray.ShowDashboard(st.WebuiURL)
+	}
+	<-ctx.Done()
+	waitForStackShutdown(stackDone)
+}
+
+func waitForStackShutdown(done <-chan struct{}) {
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		log.Println("warning: daemon stack did not stop before timeout")
+	}
 }
 
 func runClient(rawURL string) {
@@ -296,9 +351,9 @@ func runClient(rawURL string) {
 			pairingMgr.SetDHTDiscoverer(btDHT)
 		}
 	}
-	irohBackend, err := irohnet.New(ctx, cfg)
+	irohBackend, err := irohsidecar.New(ctx, cfg)
 	if err != nil {
-		log.Printf("iroh init failed (non-fatal): %v", err)
+		log.Printf("iroh sidecar init failed (non-fatal): %v", err)
 	}
 	if irohBackend != nil {
 		defer irohBackend.Close(context.Background())

@@ -30,12 +30,20 @@ func vncClientName() string {
 func launchSSH(localAddr string) error {
 	host, port := splitHostPort(localAddr)
 	fmt.Printf("tunnel: opening SSH terminal → %s\n", localAddr)
-	// Open Windows Terminal or cmd with ssh
-	for _, term := range []string{"wt", "cmd"} {
-		if path, err := exec.LookPath(term); err == nil {
-			return exec.Command(path, "ssh", fmt.Sprintf("-p %s %s", port, host)).Start()
-		}
+	sshArgs := []string{
+		"ssh",
+		"-o", "ServerAliveInterval=15",
+		"-o", "ServerAliveCountMax=3",
+		"-p", port,
+		host,
 	}
-	return exec.Command("cmd", "/C", "start", "ssh",
-		fmt.Sprintf("-p"), port, host).Start()
+	// Open Windows Terminal or cmd with ssh
+	if path, err := exec.LookPath("wt"); err == nil {
+		return exec.Command(path, sshArgs...).Start()
+	}
+	if path, err := exec.LookPath("cmd"); err == nil {
+		args := append([]string{"/C", "start", ""}, sshArgs...)
+		return exec.Command(path, args...).Start()
+	}
+	return fmt.Errorf("no terminal found to launch ssh")
 }

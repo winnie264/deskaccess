@@ -2,7 +2,6 @@
 package pairing
 
 import (
-	"context"
 	"time"
 
 	"github.com/rdpanywhere/rdpanywhere/internal/rendezvous"
@@ -13,10 +12,6 @@ func (m *Manager) TestVerifyAndConsume(tok *rendezvous.Token, remotePeerID strin
 	proof := rendezvous.InviteProof(tok.InviteSecret[:], tok.InviteID[:], m.n.NodeID(), remotePeerID, tok.ModeString(), rendezvous.TimeWindow(time.Now()))
 	_, err := m.verifyAndConsume(tok.InviteID[:], proof, remotePeerID, tok.ModeString())
 	return err
-}
-
-func (m *Manager) TestResolveInviteAddrsForBackend(ctx context.Context, backend string, peerID string, publicKeyHex string) ([]string, error) {
-	return m.resolveInviteAddrsForBackend(ctx, backend, peerID, publicKeyHex)
 }
 
 func (m *Manager) NodeIDForTest() string {

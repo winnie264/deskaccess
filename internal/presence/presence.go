@@ -14,6 +14,7 @@ import (
 	"github.com/rdpanywhere/rdpanywhere/internal/config"
 	"github.com/rdpanywhere/rdpanywhere/internal/dht"
 	"github.com/rdpanywhere/rdpanywhere/internal/logger"
+	"github.com/rdpanywhere/rdpanywhere/internal/node"
 )
 
 var plog = logger.For(logger.CompPresence)
@@ -31,7 +32,7 @@ const (
 type Announcement struct {
 	NodeID     string    `json:"id"`
 	Label      string    `json:"l"`
-	RelayAddrs []string  `json:"a"`   // live circuit relay multiaddrs
+	RelayAddrs []string  `json:"a"` // live circuit relay multiaddrs
 	Timestamp  time.Time `json:"t"`
 }
 
@@ -158,6 +159,7 @@ func (m *Manager) dhtColdStart(ctx context.Context) {
 				relayAddrs = append(relayAddrs, addr.String())
 			}
 		}
+		relayAddrs = node.FilterExternallyDialableAddrs(relayAddrs)
 		if len(relayAddrs) == 0 {
 			continue
 		}
@@ -253,7 +255,7 @@ func (m *Manager) announce(ctx context.Context) {
 	msg := Announcement{
 		NodeID:     m.h.ID().String(),
 		Label:      m.cfg.Node.Label,
-		RelayAddrs: m.getRelayAddrs(),
+		RelayAddrs: node.FilterExternallyDialableAddrs(m.getRelayAddrs()),
 		Timestamp:  time.Now(),
 	}
 	data, err := json.Marshal(msg)
@@ -320,12 +322,12 @@ func (m *Manager) receiveLoop(ctx context.Context) {
 			Label:      ann.Label,
 			Online:     true,
 			LastSeen:   time.Now(),
-			RelayAddrs: ann.RelayAddrs,
+			RelayAddrs: node.FilterExternallyDialableAddrs(ann.RelayAddrs),
 		}
 		m.peers[ann.NodeID] = s
 
 		// Also update stored relay addrs in config for this remote (persist across restarts)
-		m.updateRemoteAddrs(ann.NodeID, ann.RelayAddrs)
+		m.updateRemoteAddrs(ann.NodeID, s.RelayAddrs)
 
 		cb := m.onChange
 		m.mu.Unlock()

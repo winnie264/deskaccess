@@ -198,6 +198,11 @@
   .network-status-bar.bad .network-status-dot { background: #ef4444; }
   .network-status-main { font-weight: 600; color: #111827; white-space: nowrap; }
   .network-status-detail { color: #64748b; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .network-refresh-btn { margin-left: auto; border: 1px solid #cbd5e1; background: #ffffff;
+                         color: #334155; border-radius: 6px; padding: 5px 9px;
+                         font-size: 12px; cursor: pointer; white-space: nowrap; }
+  .network-refresh-btn:hover { border-color: #94a3b8; background: #f8fafc; }
+  .network-refresh-btn:disabled { opacity: .55; cursor: default; }
 
   .toast { position: fixed; bottom: 58px; right: 24px; background: #ffffff;
            border: 1px solid #cbd5e1; border-radius: 8px; padding: 11px 16px;
@@ -231,6 +236,7 @@
   <div class="section">
     <div class="section-title-row">
       <h2>Paired machines <span id="online-badge" style="color:#22c55e;font-size:11px;"></span></h2>
+      <button class="network-refresh-btn" onclick="refreshPairedMachines()">Refresh</button>
     </div>
     <div class="remote-list" id="remote-list">
       <div class="empty">No paired machines yet.<br>Use a Pairing Link on the Share tab to add one.</div>
@@ -311,8 +317,8 @@
       </div>
 
       <div class="gen-row">
-        <button class="btn btn-primary"   onclick="generateURL('onetime')">One-Time Link</button>
-        <button class="btn btn-secondary" onclick="generateURL('pairing')">Pairing Link</button>
+        <button class="btn btn-primary"   onclick="generateURL('pairing')">Pairing Link</button>
+        <button class="btn btn-secondary" onclick="generateURL('onetime')">One-Time Link</button>
       </div>
       <p style="font-size:12px;color:#64748b;margin-top:10px;">
         <b>One-Time</b>: temporary access for support.&nbsp;&nbsp;
@@ -523,6 +529,7 @@
   <span class="network-status-dot"></span>
   <span class="network-status-main" id="network-status-main">Network: checking...</span>
   <span class="network-status-detail" id="network-status-detail"></span>
+  <button class="network-refresh-btn" id="network-refresh-btn" onclick="refreshNetworkStatus()">Refresh</button>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -647,6 +654,36 @@ function renderNetworkStatus(status) {
   detail.textContent = parts.filter(Boolean).join(' · ');
 }
 
+async function refreshNetworkStatus() {
+  const btn = document.getElementById('network-refresh-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Refreshing';
+  }
+  try {
+    const r = await fetch('/api/status/refresh', { method: 'POST' });
+    const data = await r.json().catch(() => ({}));
+    if (data.network_status) renderNetworkStatus(data.network_status);
+    await loadRemotes();
+    if (!r.ok || data.ok === false) {
+      throw new Error(data.error || await responseText(r));
+    }
+    showToast('Network refreshed');
+  } catch (e) {
+    showToast('Refresh failed: ' + (e.message || e), true);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Refresh';
+    }
+  }
+}
+
+async function refreshPairedMachines() {
+  await loadRemotes();
+  showToast('Paired machines refreshed');
+}
+
 function backendLabel(backend) {
   return {
     iroh: 'Iroh',
@@ -702,6 +739,7 @@ async function applyMachineName(name) {
 
 // ── Remotes ───────────────────────────────────────────────────────────────────
 let latestRemotes = [];
+const connectionStates = {};
 
 async function loadRemotes() {
   const r = await fetch('/api/remotes');
@@ -711,6 +749,7 @@ async function loadRemotes() {
 
 function renderRemotes(list) {
   latestRemotes = Array.isArray(list) ? list : [];
+  latestRemotes.forEach(syncConnectionStateFromRemote);
   const el = document.getElementById('remote-list');
 
   if (!latestRemotes.length) {
@@ -722,44 +761,135 @@ function renderRemotes(list) {
   const connected = latestRemotes.filter(x => x.connected).length;
   document.getElementById('online-badge').textContent = `${connected}/${latestRemotes.length} connected`;
 
-  el.innerHTML = latestRemotes.map(r => `
-    <div class="remote-card" id="card-${r.node_id}">
-      <div class="dot ${r.connected ? 'online' : 'offline'}"></div>
+  el.innerHTML = latestRemotes.map(r => {
+    const ui = remoteUIState(r);
+    const key = remoteKey(r);
+    return `
+    <div class="remote-card" id="card-${key}">
+      <div class="dot ${ui.connected ? 'online' : 'offline'}"></div>
       <div class="remote-info">
         <div class="remote-name">
-          <span class="remote-name-text" id="name-${r.node_id}">${esc(r.label)}</span>
-          <input class="remote-name-input" id="input-${r.node_id}"
+          <span class="remote-name-text" id="name-${key}">${esc(r.label)}</span>
+          <input class="remote-name-input" id="input-${key}"
                  value="${esc(r.label)}"
-                 onkeydown="nameKey(event,'${r.node_id}')"
-                 onblur="saveRename('${r.node_id}')">
-          <button class="rename-btn" onclick="startRename('${r.node_id}')" title="Rename">✏️</button>
+                 onkeydown="nameKey(event,'${key}')"
+                 onblur="saveRename('${key}')">
+          <button class="rename-btn" onclick="startRename('${key}')" title="Rename">✏️</button>
         </div>
         <div class="remote-status">
-          ${remoteStatusText(r)}
-          ${r.connected && r.conn_type ? connBadge(r.conn_type) : ''}
+          ${remoteStatusText(Object.assign({}, r, { connected: ui.connected }))}
+          ${ui.connected && r.conn_type ? connBadge(r.conn_type) : ''}
         </div>
-        ${r.connected ? `<div class="remote-status" style="color:#166534;">Connected · ${esc(r.connected_protocol || 'rdp')} · ${esc(r.local_addr || '')}</div>` : ''}
-        ${r.connecting ? `<div class="remote-status" style="color:#2563eb;">${esc(r.connect_message || 'Connecting')}</div>` : ''}
-        <div class="remote-status" id="connect-status-${r.node_id}" style="${r.connecting ? '' : 'display:none;'}color:#2563eb;">${r.connecting ? esc(r.connect_message || 'Connecting') : ''}</div>
+        ${ui.busy ? `<div class="remote-status" style="color:#2563eb;">${esc(ui.message)}</div>` : ''}
+        <div class="remote-status" id="connect-status-${key}" style="${ui.message ? '' : 'display:none;'}color:${ui.error ? '#b91c1c' : '#2563eb'};">${esc(ui.message || '')}</div>
       </div>
       <div class="remote-btns">
-        ${r.connected ? `<button class="btn btn-primary" id="launch-${r.node_id}"
-                onclick="launchPaired('${r.node_id}')">Launch ${launchProtocolLabel(r.connected_protocol || r.protocol || 'rdp')}</button>` : ''}
-        ${r.connected && r.local_addr ? `<button class="btn btn-secondary" id="copy-${r.node_id}"
-                onclick="copyRemoteAddr('${r.node_id}')">Copy Address</button>` : ''}
-        ${r.connecting && !r.connected ? `<button class="btn btn-secondary" id="connect-${r.node_id}" disabled>Connecting...</button>
-        <button class="btn btn-danger" id="cancel-${r.node_id}" onclick="cancelConnect('${r.node_id}')">Cancel</button>` : `<button class="btn ${r.connected ? 'btn-secondary' : 'btn-primary'}" id="connect-${r.node_id}"
-                onclick="${r.connected ? `disconnectPaired('${r.node_id}')` : `connectPaired('${r.node_id}')`}">${r.connected ? 'Disconnect' : 'Connect'}</button>`}
-        <button class="btn btn-danger" onclick="removeRemote('${r.node_id}')">✕</button>
+        ${ui.connected ? `<button class="btn btn-primary" id="launch-${key}"
+                onclick="launchPaired('${key}')">Launch ${launchProtocolLabel(r.connected_protocol || r.protocol || 'rdp')}</button>` : ''}
+        ${ui.connected && r.local_addr ? `<button class="btn btn-secondary" id="copy-${key}"
+                onclick="copyRemoteAddr('${key}')">Copy Address</button>` : ''}
+        ${remoteActionButtons(r, ui)}
+        <button class="btn btn-danger" onclick="removeRemote('${key}')">✕</button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
+}
+
+function remoteKey(r) {
+  return r && (r.remote_key || r.node_id || '');
+}
+
+function syncConnectionStateFromRemote(r) {
+  const key = remoteKey(r);
+  if (!r || !key) return;
+  const current = connectionStates[key];
+  if (r.connected) {
+    connectionStates[key] = {
+      stage: 'connected',
+      message: 'Connected',
+      local_addr: r.local_addr || '',
+      error: ''
+    };
+    return;
+  }
+  if (r.connecting) {
+    connectionStates[key] = {
+      stage: 'connecting',
+      message: r.connect_message || 'Connecting',
+      error: ''
+    };
+    return;
+  }
+  if (current && ['disconnecting', 'canceling'].includes(current.stage)) return;
+  if (current && ['connected', 'connecting', 'ready', 'launching'].includes(current.stage)) {
+    connectionStates[key] = { stage: 'disconnected', message: 'Disconnected', error: '' };
+  }
+}
+
+function setConnectionState(nodeId, stage, message='', extra={}) {
+  if (!nodeId) return;
+  connectionStates[nodeId] = Object.assign({ stage, message, error: '' }, extra || {});
+  renderRemotes(latestRemotes);
+}
+
+function applyStatusToConnectionState(nodeId, st, fallback='') {
+  if (!nodeId || !st) return;
+  let stage = st.stage || 'idle';
+  if (stage === 'ready') stage = 'connected';
+  const base = stage === 'connected' ? 'Connected' : (st.message || fallback);
+  const suffix = stage === 'connected' ? '' : (st.local_addr ? ` · ${st.local_addr}` : '');
+  const message = st.error ? `${st.message || fallback}: ${st.error}` : `${base}${suffix}`;
+  connectionStates[nodeId] = {
+    stage,
+    message,
+    local_addr: st.local_addr || '',
+    error: st.error || ''
+  };
+}
+
+function remoteUIState(r) {
+  const st = connectionStates[remoteKey(r)] || {};
+  const stage = st.stage || (r.connecting ? 'connecting' : (r.connected ? 'connected' : 'disconnected'));
+  return {
+    stage,
+    connected: stage === 'connected' || stage === 'ready' || stage === 'launching',
+    busy: ['connecting', 'backend', 'pairing', 'reauth', 'authenticated', 'tunnel', 'launching', 'disconnecting', 'canceling'].includes(stage),
+    message: st.message || r.connect_message || '',
+    error: !!st.error,
+  };
+}
+
+function remoteActionButtons(r, ui) {
+  const key = remoteKey(r);
+  if (ui.stage === 'disconnecting') {
+    return `<button class="btn btn-secondary" id="connect-${key}" disabled>Disconnecting...</button>`;
+  }
+  if (ui.stage === 'canceling') {
+    return `<button class="btn btn-secondary" id="connect-${key}" disabled>Canceling...</button>`;
+  }
+  if (ui.busy && !ui.connected) {
+    return `<button class="btn btn-secondary" id="connect-${key}" disabled>Connecting...</button>
+        <button class="btn btn-danger" id="cancel-${key}" onclick="cancelConnect('${key}')">Cancel</button>`;
+  }
+  if (ui.connected) {
+    return `<button class="btn btn-secondary" id="connect-${key}"
+                onclick="disconnectPaired('${key}')">Disconnect</button>`;
+  }
+  return `<button class="btn btn-primary" id="connect-${key}"
+                onclick="connectPaired('${key}')">Connect</button>`;
 }
 
 function remoteStatusText(r) {
   if (r.connected) {
-    return 'Connected';
+    return 'Connected · ' + launchProtocolLabel(r.connected_protocol || r.protocol || 'rdp');
   }
   return 'Not connected';
+}
+
+function connectionPathText(type) {
+  if (type === 'direct') return 'Direct';
+  if (type === 'relayed' || type === 'relay') return 'Relay';
+  return 'Path pending';
 }
 
 function launchProtocolLabel(proto) {
@@ -946,10 +1076,11 @@ const networkBackends = {
   iroh: {
     configKey: 'iroh',
     modeLabels: {
+      direct: 'Direct UDP only',
       public: 'Public iroh relays',
       custom: 'Custom only',
     },
-    modes: ['public', 'custom'],
+    modes: ['direct', 'public', 'custom'],
     valuesKey: 'servers',
     customLabel: 'Custom iroh relay URLs (one per line)',
     placeholder: 'https://relay.example.com/',
@@ -1282,8 +1413,10 @@ async function doConnect() {
       body: JSON.stringify({ url })
     });
     if (r.ok) {
-      await handleLaunchResult(await r.json());
+      const result = await r.json();
+      await handleLaunchResult(result);
       document.getElementById('url-input').value = '';
+      await loadRemotes();
     } else {
       const msg = await responseError(r);
       showToast(msg, true);
@@ -1298,11 +1431,10 @@ async function connectPaired(nodeId) {
   const btn = document.getElementById('connect-' + nodeId);
   const statusEl = document.getElementById('connect-status-' + nodeId);
   if (btn && btn.disabled) return;
+  const state = connectionStates[nodeId];
+  if (state && ['connecting', 'backend', 'pairing', 'reauth', 'authenticated', 'tunnel', 'disconnecting', 'canceling'].includes(state.stage)) return;
   const original = btn ? btn.textContent : '';
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = 'Connecting...';
-  }
+  setConnectionState(nodeId, 'connecting', 'Starting connection');
   setConnectStatusText(nodeId, 'Starting connection');
   showToast('Starting connection…');
   const stopPolling = pollConnectStatus('peer:' + nodeId, nodeId);
@@ -1310,18 +1442,20 @@ async function connectPaired(nodeId) {
     const r = await fetch('/api/connect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ node_id: nodeId })
+      body: JSON.stringify({ remote_key: nodeId })
     });
     if (r.ok) {
       const result = await r.json();
+      setConnectionState(nodeId, 'connected', 'Connected', { local_addr: result.local_addr || '' });
       await handleLaunchResult(result);
       if (result.local_addr) {
-        setConnectStatusText(nodeId, 'Connected · ' + result.local_addr);
+        setConnectStatusText(nodeId, 'Connected');
       }
       await loadRemotes();
     }
     else {
       const msg = await responseError(r);
+      setConnectionState(nodeId, 'failed', 'Failed: ' + msg, { error: msg });
       setConnectStatusText(nodeId, 'Failed: ' + msg, true);
       showToast(msg, true);
       showErrorDialog('Connection failed', msg);
@@ -1346,50 +1480,50 @@ async function connectPaired(nodeId) {
 async function disconnectPaired(nodeId) {
   const btn = document.getElementById('connect-' + nodeId);
   if (btn && btn.disabled) return;
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = 'Disconnecting...';
-  }
+  const state = connectionStates[nodeId];
+  if (state && ['disconnecting', 'canceling', 'connecting', 'backend', 'pairing', 'reauth', 'authenticated', 'tunnel'].includes(state.stage)) return;
+  setConnectionState(nodeId, 'disconnecting', 'Disconnecting');
   setConnectStatusText(nodeId, 'Disconnecting');
   try {
     const r = await fetch('/api/disconnect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ node_id: nodeId })
+      body: JSON.stringify({ remote_key: nodeId })
     });
     if (!r.ok) throw new Error(await responseError(r));
-    setConnectStatusText(nodeId, 'Disconnected');
+    const result = await r.json();
+    setConnectionState(nodeId, 'disconnected', 'Disconnected');
+    applyConnectStatus(nodeId, result.connect_status, 'Disconnected');
     showToast('Disconnected');
     await loadRemotes();
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
+    setConnectionState(nodeId, state && state.stage === 'connected' ? 'connected' : 'failed', 'Disconnect failed: ' + msg, { error: msg });
     setConnectStatusText(nodeId, 'Disconnect failed: ' + msg, true);
     showToast(msg, true);
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-    }
   }
 }
 
 async function cancelConnect(nodeId) {
   const btn = document.getElementById('cancel-' + nodeId);
   if (btn && btn.disabled) return;
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = 'Canceling...';
-  }
+  setConnectionState(nodeId, 'canceling', 'Canceling connection');
   setConnectStatusText(nodeId, 'Canceling connection');
   try {
     const r = await fetch('/api/connect/cancel', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ node_id: nodeId })
+      body: JSON.stringify({ remote_key: nodeId })
     });
     if (!r.ok) throw new Error(await responseError(r));
-    showToast('Canceling connection');
+    const result = await r.json();
+    setConnectionState(nodeId, 'disconnected', 'Connection canceled');
+    applyConnectStatus(nodeId, result.connect_status, 'Connection canceled');
+    showToast('Connection canceled');
+    await loadRemotes();
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
+    setConnectionState(nodeId, 'failed', 'Cancel failed: ' + msg, { error: msg });
     setConnectStatusText(nodeId, 'Cancel failed: ' + msg, true);
     showToast(msg, true);
   } finally {
@@ -1400,26 +1534,31 @@ async function cancelConnect(nodeId) {
 async function launchPaired(nodeId) {
   const btn = document.getElementById('launch-' + nodeId);
   if (btn && btn.disabled) return;
+  const state = connectionStates[nodeId];
+  if (state && ['disconnecting', 'canceling'].includes(state.stage)) return;
   const original = btn ? btn.textContent : '';
   if (btn) {
     btn.disabled = true;
     btn.textContent = 'Launching...';
   }
+  setConnectionState(nodeId, 'launching', 'Launching RDP', { local_addr: state ? state.local_addr : '' });
   setConnectStatusText(nodeId, 'Launching RDP');
   try {
     const r = await fetch('/api/launch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ node_id: nodeId })
+      body: JSON.stringify({ remote_key: nodeId })
     });
     if (!r.ok) throw new Error(await responseError(r));
     const result = await r.json();
     await handleLaunchResult(result);
     if (result.local_addr) {
-      setConnectStatusText(nodeId, 'Connected · ' + result.local_addr);
+      setConnectionState(nodeId, 'connected', 'Connected', { local_addr: result.local_addr });
+      setConnectStatusText(nodeId, 'Connected');
     }
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
+    setConnectionState(nodeId, 'connected', 'Launch failed: ' + msg, { error: msg, local_addr: state ? state.local_addr : '' });
     setConnectStatusText(nodeId, 'Launch failed: ' + msg, true);
     showToast(msg, true);
     showErrorDialog('Launch failed', msg);
@@ -1439,6 +1578,19 @@ function setConnectStatusText(nodeId, text, isError=false) {
   el.style.color = isError ? '#b91c1c' : '#2563eb';
 }
 
+function applyConnectStatus(nodeId, st, fallback) {
+  if (!st) {
+    setConnectStatusText(nodeId, fallback || '');
+    return;
+  }
+  applyStatusToConnectionState(nodeId, st, fallback);
+  const stage = st.stage === 'ready' ? 'connected' : (st.stage || 'idle');
+  const base = stage === 'connected' ? 'Connected' : (st.message || fallback);
+  const suffix = stage === 'connected' ? '' : (st.local_addr ? ` · ${st.local_addr}` : '');
+  const text = st.error ? `${st.message || fallback}: ${st.error}` : `${base}${suffix}`;
+  setConnectStatusText(nodeId, text, !!st.error);
+}
+
 function pollConnectStatus(key, nodeId) {
   let stopped = false;
   let timer = null;
@@ -1448,10 +1600,7 @@ function pollConnectStatus(key, nodeId) {
       const r = await fetch('/api/connect/status?key=' + encodeURIComponent(key));
       if (r.ok) {
         const st = await r.json();
-        if (st && st.message) {
-          const suffix = st.local_addr ? ` · ${st.local_addr}` : '';
-          setConnectStatusText(nodeId, st.error ? `${st.message}: ${st.error}` : `${st.message}${suffix}`, !!st.error);
-        }
+        if (st && st.message) applyConnectStatus(nodeId, st, st.message);
         if (st && st.done) {
           if (nodeId) loadRemotes();
           return;
@@ -1505,7 +1654,8 @@ function pollConnectStatusURL(statusURL, nodeId) {
       if (r.ok) {
         const st = await r.json();
         if (st && st.stage !== 'idle' && st.message) {
-          const text = st.local_addr ? `${st.message} · ${st.local_addr}` : st.message;
+          const ready = st.stage === 'ready' || st.stage === 'connected';
+          const text = ready ? 'Connected' : (st.local_addr ? `${st.message} · ${st.local_addr}` : st.message);
           if (nodeId) setConnectStatusText(nodeId, st.error ? `${st.message}: ${st.error}` : text, !!st.error);
           else showToast(text, !!st.error);
         }
@@ -1580,7 +1730,7 @@ function copyManualAddr() {
 }
 
 function copyRemoteAddr(nodeId) {
-  const remote = latestRemotes.find(r => r.node_id === nodeId);
+  const remote = latestRemotes.find(r => remoteKey(r) === nodeId);
   if (!remote || !remote.local_addr) {
     showToast('No local address available', true);
     return;
@@ -1590,7 +1740,7 @@ function copyRemoteAddr(nodeId) {
 }
 
 async function removeRemote(nodeId) {
-  await fetch('/api/remotes/delete?node_id=' + nodeId, { method: 'DELETE' });
+  await fetch('/api/remotes/delete?remote_key=' + encodeURIComponent(nodeId), { method: 'DELETE' });
   loadRemotes();
 }
 
@@ -1621,6 +1771,7 @@ async function loadAllowed() {
         <div class="remote-status">
           ${p.node_id.slice(0, 16)}... ${connBadge(p.conn_type)} ${identityBadge(p)} ${rootThumbprintBadge(p)}
           · allowed ${ago(p.added_at)}
+          · ${p.last_connected_at && !String(p.last_connected_at).startsWith('0001') ? 'last connected ' + ago(p.last_connected_at) : 'no successful connection yet'}
         </div>
       </div>
       <div class="remote-btns">
@@ -1649,7 +1800,7 @@ async function saveAllowedRename(nodeId) {
   const r = await fetch('/api/allowed/rename', {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ node_id: nodeId, label })
+    body: JSON.stringify({ remote_key: nodeId, label })
   });
   if (r.ok) { text.textContent = label; input.value = label; showToast('Allowed machine renamed'); }
   else showToast(await r.text(), true);
@@ -1826,6 +1977,9 @@ function showToast(msg, err=false) {
 
 async function responseError(r) {
   const text = (await r.text()).trim();
+  if (r.status === 403) {
+    return 'Dashboard session expired or was opened outside DeskAccess. Open DeskAccess again from the app.';
+  }
   return text || r.statusText || `HTTP ${r.status}`;
 }
 

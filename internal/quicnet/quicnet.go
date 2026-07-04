@@ -17,6 +17,7 @@ import (
 
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
+	stun "github.com/pion/stun/v3"
 	"github.com/quic-go/quic-go"
 	"github.com/rdpanywhere/rdpanywhere/internal/config"
 	"github.com/rdpanywhere/rdpanywhere/internal/logger"
@@ -29,21 +30,35 @@ const (
 	idleTime   = 2 * time.Minute
 	keepAlive  = 20 * time.Second
 	maxStreams = 256
+
+	stunTimeout           = 750 * time.Millisecond
+	stunKeepaliveInterval = 25 * time.Second
 )
 
 var log = logger.For(logger.Component("quic"))
 
+var googleSTUNServers = []string{
+	"stun.l.google.com:19302",
+	"stun1.l.google.com:19302",
+	"stun2.l.google.com:19302",
+	"stun3.l.google.com:19302",
+	"stun4.l.google.com:19302",
+}
+
 type Handler func(conn io.ReadWriteCloser, remotePeerID string)
 
 type Backend struct {
-	listener *quic.Listener
-	cert     tls.Certificate
-	certPub  ed25519.PublicKey
+	listener   *quic.Listener
+	packetConn net.PacketConn
+	cert       tls.Certificate
+	certPub    ed25519.PublicKey
 
 	mu             sync.RWMutex
 	pairingHandler Handler
 	tunnelHandler  Handler
 	conns          map[string]*quic.Conn
+	stunAddrs      []string
+	stunServers    []net.Addr
 }
 
 func New(ctx context.Context, cfg *config.Config, priv ed25519.PrivateKey) (*Backend, error) {
@@ -54,17 +69,34 @@ func New(ctx context.Context, cfg *config.Config, priv ed25519.PrivateKey) (*Bac
 	if err != nil {
 		return nil, err
 	}
-	ln, err := quic.ListenAddr("0.0.0.0:0", &tls.Config{
+	packetConn, err := net.ListenPacket("udp4", "0.0.0.0:0")
+	if err != nil {
+		return nil, fmt.Errorf("listen direct QUIC UDP socket: %w", err)
+	}
+	stunAddrs, stunServers := discoverSTUNAddrs(packetConn, googleSTUNServers)
+	ln, err := quic.Listen(packetConn, &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		ClientAuth:   tls.RequireAnyClientCert,
 		NextProtos:   []string{alpn},
 	}, quicConfig())
 	if err != nil {
+		packetConn.Close()
 		return nil, fmt.Errorf("listen quic: %w", err)
 	}
-	b := &Backend{listener: ln, cert: cert, certPub: pub, conns: make(map[string]*quic.Conn)}
+	b := &Backend{
+		listener:    ln,
+		packetConn:  packetConn,
+		cert:        cert,
+		certPub:     pub,
+		conns:       make(map[string]*quic.Conn),
+		stunAddrs:   stunAddrs,
+		stunServers: stunServers,
+	}
 	go b.acceptLoop(ctx)
-	log.Info("direct QUIC backend started", "addr", ln.Addr().String())
+	if len(stunServers) > 0 {
+		go b.stunKeepaliveLoop(ctx)
+	}
+	log.Info("direct QUIC backend started", "addr", ln.Addr().String(), "stun_addrs", len(stunAddrs), "stun_servers", len(stunServers))
 	return b, nil
 }
 
@@ -104,7 +136,10 @@ func (b *Backend) Addrs() []string {
 		return []string{addr}
 	}
 	if host == "" || host == "0.0.0.0" || host == "::" {
-		return localUDPAddrs(port)
+		b.mu.RLock()
+		stunAddrs := append([]string(nil), b.stunAddrs...)
+		b.mu.RUnlock()
+		return uniqueAddrs(append(localUDPAddrs(port), stunAddrs...))
 	}
 	return []string{net.JoinHostPort(host, port)}
 }
@@ -363,6 +398,107 @@ func quicConfig() *quic.Config {
 	}
 }
 
+func discoverSTUNAddrs(conn net.PacketConn, servers []string) ([]string, []net.Addr) {
+	var addrs []string
+	var resolved []net.Addr
+	if conn == nil {
+		return nil, nil
+	}
+	for _, server := range servers {
+		addr, err := net.ResolveUDPAddr("udp", server)
+		if err != nil {
+			log.Debug("Google STUN resolve failed", "server", server, "err", err)
+			continue
+		}
+		resolved = append(resolved, addr)
+		mapped, err := querySTUN(conn, addr)
+		if err != nil {
+			log.Debug("Google STUN query failed", "server", server, "err", err)
+			continue
+		}
+		addrs = append(addrs, mapped)
+		log.Info("Google STUN mapped direct QUIC address", "server", server, "addr", mapped)
+	}
+	if len(addrs) == 0 {
+		log.Warn("Google STUN did not discover a public direct QUIC address")
+	}
+	return uniqueAddrs(addrs), resolved
+}
+
+func querySTUN(conn net.PacketConn, server net.Addr) (string, error) {
+	req := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+	if _, err := conn.WriteTo(req.Raw, server); err != nil {
+		return "", err
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(stunTimeout)); err != nil {
+		return "", err
+	}
+	defer conn.SetReadDeadline(time.Time{})
+
+	buf := make([]byte, 1500)
+	for {
+		n, _, err := conn.ReadFrom(buf)
+		if err != nil {
+			return "", err
+		}
+		if !stun.IsMessage(buf[:n]) {
+			continue
+		}
+		res := new(stun.Message)
+		res.Raw = append(res.Raw[:0], buf[:n]...)
+		if err := res.Decode(); err != nil {
+			continue
+		}
+		if res.TransactionID != req.TransactionID {
+			continue
+		}
+		var xor stun.XORMappedAddress
+		if err := xor.GetFrom(res); err == nil {
+			return net.JoinHostPort(xor.IP.String(), fmt.Sprintf("%d", xor.Port)), nil
+		}
+		var mapped stun.MappedAddress
+		if err := mapped.GetFrom(res); err == nil {
+			return net.JoinHostPort(mapped.IP.String(), fmt.Sprintf("%d", mapped.Port)), nil
+		}
+		return "", fmt.Errorf("STUN response did not include mapped address")
+	}
+}
+
+func (b *Backend) stunKeepaliveLoop(ctx context.Context) {
+	ticker := time.NewTicker(stunKeepaliveInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.sendSTUNKeepalive()
+		}
+	}
+}
+
+func (b *Backend) sendSTUNKeepalive() {
+	if b == nil || b.packetConn == nil {
+		return
+	}
+	b.mu.RLock()
+	servers := append([]net.Addr(nil), b.stunServers...)
+	b.mu.RUnlock()
+	if len(servers) == 0 {
+		return
+	}
+	req := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+	ok := 0
+	for _, server := range servers {
+		if _, err := b.packetConn.WriteTo(req.Raw, server); err != nil {
+			log.Debug("Google STUN keepalive failed", "server", server.String(), "err", err)
+			continue
+		}
+		ok++
+	}
+	log.Debug("Google STUN keepalive sent", "servers", ok)
+}
+
 func localUDPAddrs(port string) []string {
 	var out []string
 	ifaces, _ := net.Interfaces()
@@ -389,6 +525,23 @@ func localUDPAddrs(port string) []string {
 	}
 	if len(out) == 0 {
 		out = append(out, net.JoinHostPort("127.0.0.1", port))
+	}
+	return out
+}
+
+func uniqueAddrs(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, addr := range in {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			continue
+		}
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
 	}
 	return out
 }

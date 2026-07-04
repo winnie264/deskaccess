@@ -12,19 +12,20 @@ OUT="${ROOT}/dist"
 STAGE="${OUT}/stage"
 PACKAGES="${OUT}/packages"
 PKG="./cmd/deskaccess"
+SIDECAR_MANIFEST="$ROOT/sidecars/iroh-sidecar/Cargo.toml"
 
 go_env=()
 package_slug=""
 case "$TARGET" in
-  linux-amd64) target="linux-amd64"; package_slug="linux-amd64"; deb_arch="amd64"; go_env=(env GOOS=linux GOARCH=amd64); deb_deps="libc6, libgtk-3-0, libayatana-appindicator3-1" ;;
-  linux-arm64) target="linux-arm64"; package_slug="raspberry-pi-5-arm64"; deb_arch="arm64"; go_env=(env GOOS=linux GOARCH=arm64 CGO_ENABLED=0); deb_deps="libc6" ;;
-  linux-armv7) target="linux-armv7"; package_slug="raspberry-pi-32bit-armv7"; deb_arch="armhf"; go_env=(env GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0); deb_deps="libc6" ;;
+  linux-amd64) target="linux-amd64"; package_slug="linux-amd64"; deb_arch="amd64"; rust_target="x86_64-unknown-linux-gnu"; go_env=(env GOOS=linux GOARCH=amd64); deb_deps="libc6, libgtk-3-0, libayatana-appindicator3-1" ;;
+  linux-arm64) target="linux-arm64"; package_slug="raspberry-pi-5-arm64"; deb_arch="arm64"; rust_target="aarch64-unknown-linux-gnu"; go_env=(env GOOS=linux GOARCH=arm64 CGO_ENABLED=0); deb_deps="libc6" ;;
+  linux-armv7) target="linux-armv7"; package_slug="raspberry-pi-32bit-armv7"; deb_arch="armhf"; rust_target="armv7-unknown-linux-gnueabihf"; go_env=(env GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0); deb_deps="libc6" ;;
   "")
     arch="$(uname -m)"
     case "$arch" in
-      x86_64)  target="linux-amd64"; package_slug="linux-amd64"; deb_arch="amd64"; go_env=(env GOOS=linux GOARCH=amd64); deb_deps="libc6, libgtk-3-0, libayatana-appindicator3-1" ;;
-      aarch64) target="linux-arm64"; package_slug="raspberry-pi-5-arm64"; deb_arch="arm64"; go_env=(env GOOS=linux GOARCH=arm64 CGO_ENABLED=0); deb_deps="libc6" ;;
-      armv7l|armv7*) target="linux-armv7"; package_slug="raspberry-pi-32bit-armv7"; deb_arch="armhf"; go_env=(env GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0); deb_deps="libc6" ;;
+      x86_64)  target="linux-amd64"; package_slug="linux-amd64"; deb_arch="amd64"; rust_target="x86_64-unknown-linux-gnu"; go_env=(env GOOS=linux GOARCH=amd64); deb_deps="libc6, libgtk-3-0, libayatana-appindicator3-1" ;;
+      aarch64) target="linux-arm64"; package_slug="raspberry-pi-5-arm64"; deb_arch="arm64"; rust_target="aarch64-unknown-linux-gnu"; go_env=(env GOOS=linux GOARCH=arm64 CGO_ENABLED=0); deb_deps="libc6" ;;
+      armv7l|armv7*) target="linux-armv7"; package_slug="raspberry-pi-32bit-armv7"; deb_arch="armhf"; rust_target="armv7-unknown-linux-gnueabihf"; go_env=(env GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0); deb_deps="libc6" ;;
       *) echo "Unsupported Linux arch: $arch" >&2; exit 1 ;;
     esac
     ;;
@@ -48,10 +49,20 @@ echo "==> Building DeskAccess $VERSION for $target"
   -o "$pkg_stage/deskaccess-$target" \
   "$PKG"
 
+echo "==> Building iroh sidecar for $rust_target"
+cargo build \
+  --manifest-path "$SIDECAR_MANIFEST" \
+  --release \
+  --target "$rust_target"
+install -m 755 \
+  "$ROOT/sidecars/iroh-sidecar/target/$rust_target/release/deskaccess-iroh-sidecar" \
+  "$pkg_stage/deskaccess-iroh-sidecar"
+
 cp "$ROOT/build/linux/install.sh" "$pkg_stage/"
 cp "$ROOT/build/linux/uninstall.sh" "$pkg_stage/"
 cp "$ROOT/build/linux/deskaccess.service" "$pkg_stage/"
 cp "$ROOT/build/linux/deskaccess.desktop" "$pkg_stage/"
+cp "$ROOT/build/linux/deskaccess-quic.conf" "$pkg_stage/"
 cp "$ROOT/resources/deskview-256.png" "$pkg_stage/deskaccess.png"
 
 tar_pkg="$PACKAGES/deskaccess-$VERSION-$package_slug.tar.gz"
@@ -70,11 +81,14 @@ mkdir -p \
   "$deb_root/usr/share/applications" \
   "$deb_root/usr/share/icons/hicolor/256x256/apps" \
   "$deb_root/lib/systemd/system" \
+  "$deb_root/etc/sysctl.d" \
   "$deb_root/etc/deskaccess" \
   "$deb_root/var/lib/deskaccess"
 
 install -m 755 "$pkg_stage/deskaccess-$target" "$deb_root/usr/bin/deskaccess"
+install -m 755 "$pkg_stage/deskaccess-iroh-sidecar" "$deb_root/usr/bin/deskaccess-iroh-sidecar"
 install -m 644 "$ROOT/resources/deskview-256.png" "$deb_root/usr/share/icons/hicolor/256x256/apps/deskaccess.png"
+install -m 644 "$ROOT/build/linux/deskaccess-quic.conf" "$deb_root/etc/sysctl.d/99-deskaccess-quic.conf"
 sed 's#^Exec=.*#Exec=sh -c '\''if [ -n "$1" ]; then exec /usr/bin/deskaccess "$1"; fi; url=$(/usr/bin/deskaccess 2>/dev/null | tail -n 1); exec xdg-open "$url"'\'' sh %u#' "$ROOT/build/linux/deskaccess.desktop" \
   > "$deb_root/usr/share/applications/deskaccess.desktop"
 chmod 644 "$deb_root/usr/share/applications/deskaccess.desktop"
@@ -83,7 +97,7 @@ install -m 755 "$ROOT/build/linux/deb-postinst" "$deb_root/DEBIAN/postinst"
 install -m 755 "$ROOT/build/linux/deb-prerm" "$deb_root/DEBIAN/prerm"
 install -m 755 "$ROOT/build/linux/deb-postrm" "$deb_root/DEBIAN/postrm"
 
-installed_size="$(du -sk "$deb_root/usr" "$deb_root/lib" 2>/dev/null | awk '{sum += $1} END {print sum}')"
+installed_size="$(du -sk "$deb_root/usr" "$deb_root/lib" "$deb_root/etc" 2>/dev/null | awk '{sum += $1} END {print sum}')"
 cat > "$deb_root/DEBIAN/control" <<EOF
 Package: deskaccess
 Version: $VERSION

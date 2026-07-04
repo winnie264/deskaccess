@@ -281,6 +281,18 @@ func (c *Client) Lookup(ctx context.Context, publicKeyHex string, expectedNodeID
 	return out, nil
 }
 
+// LookupDirectQUIC resolves the signed BitTorrent DHT record into the direct
+// QUIC addresses used by the bittorrent_dht transport backend.
+func (c *Client) LookupDirectQUIC(ctx context.Context, publicKeyHex string, expectedNodeID string) ([]string, []string, error) {
+	rec, err := c.LookupRecord(ctx, publicKeyHex, expectedNodeID)
+	if err != nil {
+		return nil, nil, err
+	}
+	relayAddrs := append([]string(nil), rec.RelayAddrs...)
+	directQUICAddrs := append([]string(nil), rec.DirectQUICAddrs...)
+	return relayAddrs, directQUICAddrs, nil
+}
+
 // LookupRecord fetches a peer's signed BEP44 record by its 32-byte Ed25519 public key.
 func (c *Client) LookupRecord(ctx context.Context, publicKeyHex string, expectedNodeID string) (*Record, error) {
 	if c == nil {

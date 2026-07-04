@@ -1,12 +1,20 @@
 package pairing
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
 
+	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/rdpanywhere/rdpanywhere/internal/identity"
+	"github.com/rdpanywhere/rdpanywhere/internal/netbackend"
 	"github.com/rdpanywhere/rdpanywhere/internal/protocol"
+	"github.com/rdpanywhere/rdpanywhere/internal/rendezvous"
 )
 
 func TestIdentityInfoIncludesTPMRootThumbprint(t *testing.T) {
@@ -55,5 +63,89 @@ func TestVerifyStoredIdentityRejectsChangedIdentity(t *testing.T) {
 	}
 	if err := verifyStoredIdentity("", "", proof); err == nil {
 		t.Fatal("missing stored identity accepted")
+	}
+}
+
+func TestCanRepairStoredSoftwarePublicKeyRequiresMachineIDMatch(t *testing.T) {
+	proof := &protocol.IdentityProof{
+		MachineID: "machine-a",
+		PublicKey: []byte("software-public-key"),
+	}
+	err := verifyStoredIdentity(hex.EncodeToString([]byte("old-wrong-key")), "machine-a", proof)
+	if err == nil {
+		t.Fatal("expected public key mismatch")
+	}
+	if !canRepairStoredSoftwarePublicKey(err, "machine-a", proof) {
+		t.Fatal("expected repair to be allowed when verified machine ID matches")
+	}
+	if canRepairStoredSoftwarePublicKey(err, "machine-b", proof) {
+		t.Fatal("repair allowed for different machine ID")
+	}
+}
+
+func TestPairRequestNodeIDAllowsIrohTransportPeerToDiffer(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	key, err := libp2pcrypto.UnmarshalEd25519PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("unmarshal key: %v", err)
+	}
+	nodeID, err := peer.IDFromPrivateKey(key)
+	if err != nil {
+		t.Fatalf("peer id: %v", err)
+	}
+
+	got, err := pairRequestNodeID(protocol.PairRequest{NodeID: nodeID.String()}, "sidecar-transport-peer", netbackend.BackendIroh)
+	if err != nil {
+		t.Fatalf("pairRequestNodeID: %v", err)
+	}
+	if got != nodeID.String() {
+		t.Fatalf("node id = %q, want %q", got, nodeID)
+	}
+
+	_, err = pairRequestNodeID(protocol.PairRequest{}, "sidecar-transport-peer", netbackend.BackendIroh)
+	if err == nil || !strings.Contains(err.Error(), "upgrade DeskAccess") {
+		t.Fatalf("missing node id error = %v, want upgrade guidance", err)
+	}
+}
+
+func TestIdentityProofUsesDeskAccessNodeIDNotIrohTransportPeer(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	key, err := libp2pcrypto.UnmarshalEd25519PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("unmarshal key: %v", err)
+	}
+	id := &identity.Identity{PrivKey: key, Backend: identity.BackendSoftware}
+	nodeID, err := peer.IDFromPrivateKey(key)
+	if err != nil {
+		t.Fatalf("peer id: %v", err)
+	}
+
+	hostID := "12D3KooWHostNode"
+	transportPeer := "abdb7df6403a"
+	window := rendezvous.TimeWindow(time.Now())
+	msg := identityProofMessage("request", nodeID.String(), hostID, nil, nil, nil, "pairing", window)
+	sig, err := id.SignProof(msg)
+	if err != nil {
+		t.Fatalf("sign proof: %v", err)
+	}
+	proof := &protocol.IdentityProof{
+		Backend:    string(identity.BackendSoftware),
+		MachineID:  id.MachineID(),
+		PublicKey:  id.PublicKeyRaw(),
+		TimeWindow: window,
+		Signature:  sig,
+	}
+
+	if err := verifyIdentityProof(proof, nil, "request", nodeID.String(), hostID, nil, nil, nil, "pairing"); err != nil {
+		t.Fatalf("verify with DeskAccess node id: %v", err)
+	}
+	if err := verifyIdentityProof(proof, nil, "request", transportPeer, hostID, nil, nil, nil, "pairing"); err == nil {
+		t.Fatal("verify unexpectedly succeeded with iroh transport peer id")
 	}
 }

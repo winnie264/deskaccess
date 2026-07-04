@@ -218,7 +218,7 @@ private data class InviteToken(
                 mode = flags and 0x0f,
                 protocol = (flags ushr 4) and 0x0f,
                 targetPort = targetPort,
-                hasIrohTicket = !uri.getQueryParameter("iroh").isNullOrBlank(),
+                hasIrohTicket = !uri.getQueryParameter("iroh_ticket").isNullOrBlank(),
                 explicitAddrs = uri.getQueryParameters("addr").size
             )
         }

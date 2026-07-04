@@ -20,10 +20,11 @@ func NewFromHost(h host.Host, cfg *config.Config) *Node {
 		addrs = append(addrs, stub)
 	}
 	return &Node{
-		Host:          h,
-		PeerID:        h.ID(),
-		cfg:           cfg,
-		relayAddrs:    addrs,
-		testRelayMask: 0x01, // bypass Connectedness check in tests
+		Host:              h,
+		PeerID:            h.ID(),
+		cfg:               cfg,
+		relayAddrs:        addrs,
+		testRelayMask:     0x01, // bypass Connectedness check in tests
+		allowLoopbackDial: true,
 	}
 }

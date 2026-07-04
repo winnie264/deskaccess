@@ -1,10 +1,17 @@
 package tunnel
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"net"
+	"strings"
 	"testing"
 
+	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/rdpanywhere/rdpanywhere/internal/config"
+	"github.com/rdpanywhere/rdpanywhere/internal/netbackend"
+	"github.com/rdpanywhere/rdpanywhere/internal/protocol"
 )
 
 func TestListenLocalTunnelFallsBackWhenPreferredPortBusy(t *testing.T) {
@@ -84,5 +91,72 @@ func TestConnectTargetAllowsOnlyLoopbackHosts(t *testing.T) {
 		if isLoopbackHost(host) {
 			t.Fatalf("isLoopbackHost(%q) = true, want false", host)
 		}
+	}
+}
+
+func TestTunnelHelloNodeIDAllowsIrohTransportPeerToDiffer(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	key, err := libp2pcrypto.UnmarshalEd25519PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("unmarshal key: %v", err)
+	}
+	nodeID, err := peer.IDFromPrivateKey(key)
+	if err != nil {
+		t.Fatalf("peer id: %v", err)
+	}
+
+	got, err := tunnelHelloNodeID(protocol.TunnelHello{NodeID: nodeID.String()}, "sidecar-transport-peer", netbackend.BackendIroh)
+	if err != nil {
+		t.Fatalf("tunnelHelloNodeID: %v", err)
+	}
+	if got != nodeID.String() {
+		t.Fatalf("node id = %q, want %q", got, nodeID)
+	}
+
+	_, err = tunnelHelloNodeID(protocol.TunnelHello{}, "sidecar-transport-peer", netbackend.BackendIroh)
+	if err == nil || !strings.Contains(err.Error(), "upgrade DeskAccess") {
+		t.Fatalf("missing node id error = %v, want upgrade guidance", err)
+	}
+}
+
+func TestLocalProxyActiveCounts(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	proxy := newLocalProxy(ln.Addr().String(), ln)
+	defer proxy.Close()
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	proxy.track(client)
+	if got := proxy.ActiveClients(); got != 1 {
+		t.Fatalf("ActiveClients after track = %d, want 1", got)
+	}
+	if got := proxy.ActiveStreams(); got != 0 {
+		t.Fatalf("ActiveStreams before remote stream = %d, want 0", got)
+	}
+
+	if !proxy.trackStream("stream-1", client, server) {
+		t.Fatal("trackStream returned false")
+	}
+	if got := proxy.ActiveClients(); got != 1 {
+		t.Fatalf("ActiveClients after trackStream = %d, want 1", got)
+	}
+	if got := proxy.ActiveStreams(); got != 1 {
+		t.Fatalf("ActiveStreams after trackStream = %d, want 1", got)
+	}
+
+	proxy.untrackStream("stream-1", client)
+	if got := proxy.ActiveClients(); got != 0 {
+		t.Fatalf("ActiveClients after untrackStream = %d, want 0", got)
+	}
+	if got := proxy.ActiveStreams(); got != 0 {
+		t.Fatalf("ActiveStreams after untrackStream = %d, want 0", got)
 	}
 }

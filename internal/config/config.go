@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
@@ -68,13 +70,14 @@ type BTDHTConfig struct {
 	PublishIntervalSecs int      `toml:"publish_interval_secs"` // default: 60
 }
 
-// IrohConfig controls the go-iroh backend.
+// IrohConfig controls the iroh backend.
 //
 // mode = "disabled" — do not use iroh
+// mode = "direct"   — use direct UDP/QNT only; no relay fallback
 // mode = "public"   — use the built-in n0 iroh relay map
 // mode = "custom"   — use only relay URLs listed in servers[]
 type IrohConfig struct {
-	Mode    string   `toml:"mode"`    // "disabled" | "public" | "custom"
+	Mode    string   `toml:"mode"`    // "disabled" | "direct" | "public" | "custom"
 	Servers []string `toml:"servers"` // iroh relay URLs for custom mode
 }
 
@@ -114,6 +117,7 @@ type RemoteConfig struct {
 	TPMVersion        string    `toml:"tpm_version"`
 	TPMRootThumbprint string    `toml:"tpm_root_thumbprint"`
 	AddedAt           time.Time `toml:"added_at"`
+	LastConnectedAt   time.Time `toml:"last_connected_at"`
 }
 
 // TrustedPeer is a peer allowed to connect to this machine without a one-time token
@@ -130,6 +134,7 @@ type TrustedPeer struct {
 	TPMVersion        string    `toml:"tpm_version"`
 	TPMRootThumbprint string    `toml:"tpm_root_thumbprint"`
 	AddedAt           time.Time `toml:"added_at"`
+	LastConnectedAt   time.Time `toml:"last_connected_at"`
 }
 
 var defaultConfig = Config{
@@ -273,9 +278,12 @@ func (c *Config) PrivateKeyBytes() (ed25519.PrivateKey, error) {
 }
 
 func (c *Config) AddRemote(r RemoteConfig) {
-	r.AddedAt = time.Now()
+	now := time.Now()
+	if r.AddedAt.IsZero() {
+		r.AddedAt = now
+	}
 	for i := range c.Remotes {
-		if c.Remotes[i].NodeID == r.NodeID {
+		if SameRemoteService(c.Remotes[i], r) {
 			if r.Label != "" {
 				c.Remotes[i].Label = r.Label
 			}
@@ -304,11 +312,49 @@ func (c *Config) AddRemote(r RemoteConfig) {
 				c.Remotes[i].DirectQUICAddrs = r.DirectQUICAddrs
 			}
 			mergeIdentityInfo(&c.Remotes[i].IdentityBackend, &c.Remotes[i].HardwareBacked, &c.Remotes[i].TPMVendor, &c.Remotes[i].TPMVersion, &c.Remotes[i].TPMRootThumbprint, r.IdentityBackend, r.HardwareBacked, r.TPMVendor, r.TPMVersion, r.TPMRootThumbprint)
-			c.Remotes[i].AddedAt = r.AddedAt
+			if c.Remotes[i].AddedAt.IsZero() || (!r.AddedAt.IsZero() && r.AddedAt.Before(c.Remotes[i].AddedAt)) {
+				c.Remotes[i].AddedAt = r.AddedAt
+			}
+			if r.LastConnectedAt.After(c.Remotes[i].LastConnectedAt) {
+				c.Remotes[i].LastConnectedAt = r.LastConnectedAt
+			}
 			return
 		}
 	}
 	c.Remotes = append(c.Remotes, r)
+}
+
+func RemoteServiceKey(r RemoteConfig) string {
+	return RemoteServiceKeyParts(r.NodeID, r.Protocol, r.TargetPort)
+}
+
+func RemoteServiceKeyParts(nodeID, protocol string, targetPort int) string {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol == "" {
+		protocol = "rdp"
+	}
+	if targetPort <= 0 {
+		targetPort = protocolDefaultPort(protocol)
+	}
+	return strings.TrimSpace(nodeID) + "|" + protocol + "|" + strconv.Itoa(targetPort)
+}
+
+func SameRemoteService(a, b RemoteConfig) bool {
+	if strings.TrimSpace(a.NodeID) == "" || strings.TrimSpace(b.NodeID) == "" {
+		return false
+	}
+	return RemoteServiceKey(a) == RemoteServiceKey(b)
+}
+
+func protocolDefaultPort(protocol string) int {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "ssh":
+		return 22
+	case "vnc":
+		return 5900
+	default:
+		return 3389
+	}
 }
 
 func (c *Config) RemoveRemote(nodeID string) bool {
@@ -321,8 +367,21 @@ func (c *Config) RemoveRemote(nodeID string) bool {
 	return false
 }
 
+func (c *Config) RemoveRemoteService(key string) bool {
+	for i := range c.Remotes {
+		if RemoteServiceKey(c.Remotes[i]) == key {
+			c.Remotes = append(c.Remotes[:i], c.Remotes[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Config) AddTrustedPeer(p TrustedPeer) {
-	p.AddedAt = time.Now()
+	now := time.Now()
+	if p.AddedAt.IsZero() {
+		p.AddedAt = now
+	}
 	for i := range c.Trusted {
 		if sameTrustedMachine(c.Trusted[i], p) {
 			mergeTrustedPeer(&c.Trusted[i], p)
@@ -366,7 +425,12 @@ func mergeTrustedPeer(dst *TrustedPeer, src TrustedPeer) {
 		dst.TargetPort = src.TargetPort
 	}
 	mergeIdentityInfo(&dst.IdentityBackend, &dst.HardwareBacked, &dst.TPMVendor, &dst.TPMVersion, &dst.TPMRootThumbprint, src.IdentityBackend, src.HardwareBacked, src.TPMVendor, src.TPMVersion, src.TPMRootThumbprint)
-	dst.AddedAt = src.AddedAt
+	if dst.AddedAt.IsZero() || (!src.AddedAt.IsZero() && src.AddedAt.Before(dst.AddedAt)) {
+		dst.AddedAt = src.AddedAt
+	}
+	if src.LastConnectedAt.After(dst.LastConnectedAt) {
+		dst.LastConnectedAt = src.LastConnectedAt
+	}
 }
 
 func (c *Config) removeDuplicateTrustedPeers(keep int) {

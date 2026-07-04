@@ -1,6 +1,9 @@
 package protocol
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func TestSessionTokenCanBeVerifiedMultipleTimesBeforeExpiry(t *testing.T) {
 	store := NewSessionStore()
@@ -37,4 +40,43 @@ func TestSessionTokenCarriesTargetPortGrant(t *testing.T) {
 	if grant.TargetPort != 22 {
 		t.Fatalf("TargetPort = %d, want 22", grant.TargetPort)
 	}
+}
+
+func TestWriteFrameHandlesShortWrites(t *testing.T) {
+	var buf bytes.Buffer
+	writer := shortWriter{w: &buf, max: 2}
+	payload := PairRequest{
+		Version: Version,
+		Mode:    "pairing",
+		Label:   "client",
+	}
+	if err := WriteFrame(writer, MsgPairRequest, payload); err != nil {
+		t.Fatalf("WriteFrame() error = %v", err)
+	}
+	msgType, raw, err := ReadFrame(&buf)
+	if err != nil {
+		t.Fatalf("ReadFrame() error = %v", err)
+	}
+	if msgType != MsgPairRequest {
+		t.Fatalf("msgType = 0x%02x, want 0x%02x", msgType, MsgPairRequest)
+	}
+	var got PairRequest
+	if err := Decode(raw, &got); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if got.Label != payload.Label || got.Mode != payload.Mode {
+		t.Fatalf("payload = %+v, want %+v", got, payload)
+	}
+}
+
+type shortWriter struct {
+	w   *bytes.Buffer
+	max int
+}
+
+func (s shortWriter) Write(p []byte) (int, error) {
+	if len(p) > s.max {
+		p = p[:s.max]
+	}
+	return s.w.Write(p)
 }

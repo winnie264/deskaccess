@@ -24,10 +24,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/rdpanywhere/rdpanywhere/internal/btdht"
 	"github.com/rdpanywhere/rdpanywhere/internal/config"
 	"github.com/rdpanywhere/rdpanywhere/internal/logger"
 	"github.com/rdpanywhere/rdpanywhere/internal/netbackend"
@@ -39,7 +42,17 @@ import (
 var tlog = logger.For(logger.CompTunnel)
 
 const tunnelResponseTimeout = 15 * time.Second
-const bridgeProgressEvery = 4 * 1024 * 1024
+const defaultTunnelOpenTimeout = 30 * time.Second
+const irohTunnelOpenTimeout = 2 * time.Minute
+const bridgeProgressEvery = 16 * 1024 * 1024
+const bridgeInitialReadLogs = 3
+const bridgeInitialWriteLogs = 3
+const bridgeInitialIdleLogAfter = 15 * time.Second
+const bridgeIdleLogInterval = 60 * time.Second
+const bridgeSlowWriteThreshold = 2 * time.Second
+const bridgeWriteBufferSize = 32 * 1024
+
+var bridgeWriteTimeout = 30 * time.Second
 
 // Manager handles RDP tunnels on both host and client sides.
 type Manager struct {
@@ -57,14 +70,79 @@ type Manager struct {
 type LocalProxy struct {
 	Addr string
 
-	ln     net.Listener
-	mu     sync.Mutex
-	conns  map[net.Conn]struct{}
-	closed bool
+	ln             net.Listener
+	mu             sync.Mutex
+	conns          map[net.Conn]struct{}
+	streams        map[string]*proxyStream
+	connectionPath string
+	connectionAddr string
+	closed         bool
+	onClose        func()
+	closeOnce      sync.Once
+}
+
+type proxyStream struct {
+	client net.Conn
+	remote io.Closer
 }
 
 func newLocalProxy(addr string, ln net.Listener) *LocalProxy {
-	return &LocalProxy{Addr: addr, ln: ln, conns: make(map[net.Conn]struct{})}
+	return &LocalProxy{Addr: addr, ln: ln, conns: make(map[net.Conn]struct{}), streams: make(map[string]*proxyStream)}
+}
+
+func (p *LocalProxy) SetConnectionPath(path string, addr string) {
+	path = normalizeConnectionPath(path)
+	if p == nil || path == "" || path == "unknown" {
+		return
+	}
+	p.mu.Lock()
+	p.connectionPath = path
+	if strings.TrimSpace(addr) != "" {
+		p.connectionAddr = strings.TrimSpace(addr)
+	}
+	p.mu.Unlock()
+}
+
+func (p *LocalProxy) ConnectionPath() string {
+	if p == nil {
+		return "unknown"
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.connectionPath == "" {
+		return "unknown"
+	}
+	return p.connectionPath
+}
+
+func (p *LocalProxy) ConnectionAddr() string {
+	if p == nil {
+		return ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.connectionAddr
+}
+
+func (p *LocalProxy) SetOnClose(fn func()) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	closed := p.closed
+	previous := p.onClose
+	if previous == nil {
+		p.onClose = fn
+	} else if fn != nil {
+		p.onClose = func() {
+			previous()
+			fn()
+		}
+	}
+	p.mu.Unlock()
+	if closed && fn != nil {
+		fn()
+	}
 }
 
 func (p *LocalProxy) track(conn net.Conn) {
@@ -83,6 +161,45 @@ func (p *LocalProxy) untrack(conn net.Conn) {
 	p.mu.Unlock()
 }
 
+func (p *LocalProxy) trackStream(streamID string, client net.Conn, remote io.Closer) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		client.Close()
+		if remote != nil {
+			remote.Close()
+		}
+		return false
+	}
+	p.conns[client] = struct{}{}
+	p.streams[streamID] = &proxyStream{client: client, remote: remote}
+	return true
+}
+
+func (p *LocalProxy) untrackStream(streamID string, client net.Conn) {
+	p.mu.Lock()
+	delete(p.streams, streamID)
+	delete(p.conns, client)
+	p.mu.Unlock()
+}
+
+func (p *LocalProxy) CloseStream(streamID string) {
+	p.mu.Lock()
+	stream := p.streams[streamID]
+	delete(p.streams, streamID)
+	if stream != nil {
+		delete(p.conns, stream.client)
+	}
+	p.mu.Unlock()
+	if stream == nil {
+		return
+	}
+	stream.client.Close()
+	if stream.remote != nil {
+		stream.remote.Close()
+	}
+}
+
 func (p *LocalProxy) Close() error {
 	p.mu.Lock()
 	if p.closed {
@@ -94,14 +211,39 @@ func (p *LocalProxy) Close() error {
 	for conn := range p.conns {
 		conns = append(conns, conn)
 	}
+	var streams []io.Closer
+	for _, stream := range p.streams {
+		if stream.remote != nil {
+			streams = append(streams, stream.remote)
+		}
+	}
 	p.conns = make(map[net.Conn]struct{})
+	p.streams = make(map[string]*proxyStream)
 	p.mu.Unlock()
 
 	err := p.ln.Close()
 	for _, conn := range conns {
 		conn.Close()
 	}
+	for _, stream := range streams {
+		stream.Close()
+	}
+	p.notifyClosed()
 	return err
+}
+
+func (p *LocalProxy) notifyClosed() {
+	if p == nil {
+		return
+	}
+	p.closeOnce.Do(func() {
+		p.mu.Lock()
+		fn := p.onClose
+		p.mu.Unlock()
+		if fn != nil {
+			fn()
+		}
+	})
 }
 
 func (p *LocalProxy) CloseConnections() {
@@ -110,31 +252,72 @@ func (p *LocalProxy) CloseConnections() {
 	for conn := range p.conns {
 		conns = append(conns, conn)
 	}
+	var streams []io.Closer
+	for _, stream := range p.streams {
+		if stream.remote != nil {
+			streams = append(streams, stream.remote)
+		}
+	}
 	p.conns = make(map[net.Conn]struct{})
+	p.streams = make(map[string]*proxyStream)
 	p.mu.Unlock()
 	for _, conn := range conns {
 		conn.Close()
 	}
+	for _, stream := range streams {
+		stream.Close()
+	}
+}
+
+func (p *LocalProxy) ActiveClients() int {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.conns)
+}
+
+func (p *LocalProxy) ActiveStreams() int {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.streams)
 }
 
 func New(n *node.Node, cfg *config.Config, pres *presence.Manager, sessions *protocol.SessionStore) *Manager {
 	m := &Manager{n: n, cfg: cfg, presence: pres, sessions: sessions, backends: netbackend.NewRegistry()}
-	m.backends.Register(netbackend.NewLibp2p(n), netbackend.BackendLibp2pDHT)
-	n.SetTunnelHandler(m.handleIncoming)
+	if n.Libp2pRunning() {
+		m.SetLibp2p(true)
+	}
 	return m
 }
 
-// SetIroh injects the go-iroh backend.
+// SetLibp2p registers or unregisters the libp2p backend. The service calls
+// this only after the libp2p backend lifecycle has been started.
+func (m *Manager) SetLibp2p(enabled bool) {
+	if enabled {
+		m.backends.Register(netbackend.NewLibp2p(m.n), netbackend.BackendLibp2pDHT)
+		m.n.SetTunnelHandler(m.handleIncoming)
+		return
+	}
+	m.backends.Unregister(netbackend.BackendLibp2pRelay, netbackend.BackendLibp2pDHT)
+}
+
+// SetIroh injects the iroh sidecar backend.
 func (m *Manager) SetIroh(i interface {
 	TicketContext(ctx context.Context) (string, error)
 	OpenPairing(ctx context.Context, ticket string) (io.ReadWriteCloser, error)
 	OpenTunnel(ctx context.Context, ticket string) (io.ReadWriteCloser, error)
+	CloseTunnel(peerID string, reason string) int
 }) {
 	if i == nil {
 		m.backends.Unregister(netbackend.BackendIroh)
 		return
 	}
-	m.backends.Register(netbackend.NewIroh(i))
+	m.backends.Register(netbackend.NewIrohSidecar(i))
 }
 
 // SetBitTorrentQUIC injects the direct QUIC transport used by BitTorrent DHT.
@@ -146,7 +329,7 @@ func (m *Manager) SetBitTorrentQUIC(q interface {
 		m.backends.Unregister(netbackend.BackendBitTorrentDHT)
 		return
 	}
-	m.backends.Register(netbackend.NewDirectQUIC(q))
+	m.backends.Register(btdht.NewDirectQUICBackend(q))
 }
 
 // --- HOST SIDE ---
@@ -154,20 +337,20 @@ func (m *Manager) SetBitTorrentQUIC(q interface {
 // handleIncoming is called when a client opens a tunnel stream.
 // Runs the TunnelHello / TunnelReady handshake, then proxies raw RDP data.
 func (m *Manager) handleIncoming(s network.Stream) {
-	m.handleIncomingConn(s, s.Conn().RemotePeer().String(), func() { s.Reset() })
+	m.handleIncomingConn(s, s.Conn().RemotePeer().String(), netbackend.BackendLibp2pRelay, func() { s.Reset() })
 }
 
 // HandleIrohIncoming runs the tunnel protocol over an iroh stream.
 func (m *Manager) HandleIrohIncoming(conn io.ReadWriteCloser, remotePeerID string) {
-	m.handleIncomingConn(conn, remotePeerID, func() { conn.Close() })
+	m.handleIncomingConn(conn, remotePeerID, netbackend.BackendIroh, func() { conn.Close() })
 }
 
 // HandleQUICIncoming runs the tunnel protocol over a direct QUIC stream.
 func (m *Manager) HandleQUICIncoming(conn io.ReadWriteCloser, remotePeerID string) {
-	m.handleIncomingConn(conn, remotePeerID, func() { conn.Close() })
+	m.handleIncomingConn(conn, remotePeerID, netbackend.BackendBitTorrentDHT, func() { conn.Close() })
 }
 
-func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remote string, reset func()) {
+func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remote string, transportBackend string, reset func()) {
 
 	// --- handshake ---
 	msgType, payload, err := protocol.ReadFrame(s)
@@ -217,19 +400,29 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remote string, reset 
 		s.Close()
 		return
 	}
+	requestPeerID, err := tunnelHelloNodeID(hello, remote, transportBackend)
+	if err != nil {
+		tlog.Warn("tunnel rejected because node id is invalid", "transport_peer", shortPeer(remote), "stream_id", hello.StreamID, "err", err)
+		protocol.WriteFrame(s, protocol.MsgTunnelError, protocol.TunnelError{Reason: err.Error()})
+		s.Close()
+		return
+	}
+	if requestPeerID != remote {
+		tlog.Info("tunnel mapped transport peer to DeskAccess node", "transport_peer", shortPeer(remote), "node_id", shortPeer(requestPeerID), "stream_id", hello.StreamID, "transport_backend", transportBackend)
+	}
 
 	m.mu.Lock()
 	grant, err := m.sessions.VerifyGrant(hello.SessionToken)
 	m.mu.Unlock()
 	if err != nil {
-		tlog.Warn("session token rejected", "peer", remote[:12], "err", err)
+		tlog.Warn("session token rejected", "peer", shortPeer(requestPeerID), "transport_peer", shortPeer(remote), "err", err)
 		protocol.WriteFrame(s, protocol.MsgTunnelError, protocol.TunnelError{Reason: err.Error()})
 		s.Close()
 		return
 	}
-	if grant.PeerID != remote {
+	if grant.PeerID != requestPeerID {
 		tlog.Warn("session token peer mismatch",
-			"issued_for", grant.PeerID[:12], "used_by", remote[:12])
+			"issued_for", shortPeer(grant.PeerID), "used_by", shortPeer(requestPeerID), "transport_peer", shortPeer(remote))
 		protocol.WriteFrame(s, protocol.MsgTunnelError, protocol.TunnelError{
 			Reason: "session token was not issued for this peer",
 		})
@@ -242,7 +435,7 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remote string, reset 
 	}
 	if hello.TargetPort > 0 && hello.TargetPort != grantedPort {
 		tlog.Warn("CONNECT target port rejected",
-			"peer", remote[:12],
+			"peer", shortPeer(requestPeerID),
 			"requested_port", hello.TargetPort,
 			"granted_port", grantedPort,
 			"stream_id", hello.StreamID)
@@ -255,7 +448,7 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remote string, reset 
 	targetAddr := m.targetAddrForPort(grantedPort)
 	if strings.TrimSpace(hello.TargetHost) != "" && !isLoopbackHost(hello.TargetHost) {
 		tlog.Warn("non-loopback CONNECT target rejected",
-			"peer", remote[:12],
+			"peer", shortPeer(requestPeerID),
 			"target_host", hello.TargetHost,
 			"target_port", hello.TargetPort,
 			"stream_id", hello.StreamID)
@@ -266,7 +459,8 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remote string, reset 
 		return
 	}
 	tlog.Info("CONNECT request accepted",
-		"peer", remote[:12],
+		"peer", shortPeer(requestPeerID),
+		"transport_peer", shortPeer(remote),
 		"target", targetAddr,
 		"target_host", connectTargetHost(hello.TargetHost),
 		"requested_port", hello.TargetPort,
@@ -283,14 +477,15 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remote string, reset 
 		return
 	}
 	tlog.Info("CONNECT response sent",
-		"peer", remote[:12],
+		"peer", shortPeer(requestPeerID),
+		"transport_peer", shortPeer(remote),
 		"status", 200,
 		"target", targetAddr,
 		"target_port", grantedPort,
 		"stream_id", hello.StreamID)
 
-	tlog.Info("data channel open", "peer", remote[:12], "target", targetAddr, "stream_id", hello.StreamID)
-	m.proxyToService(s, remote, targetAddr, hello.StreamID)
+	tlog.Info("data channel open", "peer", shortPeer(requestPeerID), "transport_peer", shortPeer(remote), "target", targetAddr, "stream_id", hello.StreamID)
+	m.proxyToService(s, requestPeerID, targetAddr, hello.StreamID)
 }
 
 // proxyToService dials the local service (RDP/VNC/SSH) and bridges the stream.
@@ -463,6 +658,9 @@ func (m *Manager) connectStream(
 
 	localAddr := ln.Addr().String()
 	proxy := newLocalProxy(localAddr, ln)
+	proxy.SetOnClose(func() {
+		m.closeBackendTunnel(peerID, transportEndpoint, "local proxy closed")
+	})
 	tlog.Info("local proxy started", "addr", localAddr, "peer", peerID[:12])
 
 	go func() {
@@ -470,6 +668,7 @@ func (m *Manager) connectStream(
 			conn, err := ln.Accept()
 			if err != nil {
 				tlog.Info("local proxy stopped", "addr", localAddr, "peer", peerID[:12], "err", err)
+				proxy.notifyClosed()
 				return
 			}
 			proxy.track(conn)
@@ -481,12 +680,17 @@ func (m *Manager) connectStream(
 			tuneTCPConn(conn)
 			go func(conn net.Conn) {
 				defer proxy.untrack(conn)
-				openCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				openTimeout := defaultTunnelOpenTimeout
+				if transportEndpoint != "" && !strings.HasPrefix(transportEndpoint, "quic:") {
+					openTimeout = irohTunnelOpenTimeout
+				}
+				openCtx, cancel := context.WithTimeout(context.Background(), openTimeout)
 				defer cancel()
 				streamID := newStreamID()
 				tlog.Info("opening tunnel stream for local client",
 					"peer", peerID[:12],
 					"stream_id", streamID,
+					"timeout", openTimeout.String(),
 					"proxy_addr", conn.LocalAddr().String(),
 					"client_addr", conn.RemoteAddr().String(),
 					"target_port", targetPort)
@@ -501,8 +705,17 @@ func (m *Manager) connectStream(
 						"client_addr", conn.RemoteAddr().String(),
 						"target_port", targetPort,
 						"err", err)
-					proxy.CloseConnections()
 					conn.Close()
+					return
+				}
+				proxy.SetConnectionPath(connectionPathForStream(stream, transportEndpoint), m.connectionAddrForStream(stream, transportEndpoint))
+				if !proxy.trackStream(streamID, conn, stream) {
+					tlog.Warn("local proxy closed before stream could be tracked",
+						"peer", peerID[:12],
+						"stream_id", streamID,
+						"proxy_addr", conn.LocalAddr().String(),
+						"client_addr", conn.RemoteAddr().String(),
+						"target_port", targetPort)
 					return
 				}
 				tlog.Info("bridging local RDP client to tunnel",
@@ -512,13 +725,14 @@ func (m *Manager) connectStream(
 					"proxy_addr", conn.LocalAddr().String(),
 					"client_addr", conn.RemoteAddr().String(),
 					"target_port", targetPort)
-				if bridgeLogged("client", peerID[:12], streamID, "", conn, stream, "remote_to_local", "local_to_remote") {
-					tlog.Warn("tunnel bridge failed, closing active local proxy connections",
+				defer proxy.untrackStream(streamID, conn)
+				if bridgeLogged("client", peerID[:12], streamID, conn.RemoteAddr().String(), conn, stream, "remote_to_local", "local_to_remote") {
+					tlog.Warn("tunnel bridge failed, closing matching local proxy stream",
 						"peer", peerID[:12],
 						"stream_id", streamID,
 						"proxy_addr", conn.LocalAddr().String(),
 						"target_port", targetPort)
-					proxy.CloseConnections()
+					proxy.CloseStream(streamID)
 				}
 				tlog.Info("local RDP connection ended",
 					"peer", peerID[:12],
@@ -531,6 +745,97 @@ func (m *Manager) connectStream(
 	}()
 
 	return proxy, nil
+}
+
+type connectionPathReporter interface {
+	ConnectionPath() string
+}
+
+type connectionAddrReporter interface {
+	ConnectionRemoteAddr() string
+}
+
+func connectionPathForStream(stream io.ReadWriteCloser, transportEndpoint string) string {
+	if strings.HasPrefix(transportEndpoint, "quic:") {
+		return "direct"
+	}
+	if transportEndpoint == "" {
+		return "relayed"
+	}
+	if reporter, ok := stream.(connectionPathReporter); ok {
+		return reporter.ConnectionPath()
+	}
+	return "unknown"
+}
+
+func (m *Manager) connectionAddrForStream(stream io.ReadWriteCloser, transportEndpoint string) string {
+	if strings.HasPrefix(transportEndpoint, "quic:") {
+		if m == nil || m.backends == nil {
+			return ""
+		}
+		backend, ok := m.backends.Get(netbackend.BackendBitTorrentDHT)
+		if !ok {
+			return ""
+		}
+		reporter, ok := backend.(netbackend.DisplayAddrBackend)
+		if !ok {
+			return ""
+		}
+		return reporter.ConnectionDisplayAddr(netbackend.Target{
+			QUICEndpoint: strings.TrimPrefix(transportEndpoint, "quic:"),
+		})
+	}
+	if reporter, ok := stream.(connectionAddrReporter); ok {
+		addr := strings.TrimSpace(reporter.ConnectionRemoteAddr())
+		if isIrohVirtualAddr(addr) {
+			return ""
+		}
+		return addr
+	}
+	return ""
+}
+
+func isIrohVirtualAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = strings.Trim(addr, "[]")
+	}
+	host = strings.Trim(host, "[]")
+	return strings.HasPrefix(strings.ToLower(host), "fd15:")
+}
+
+func normalizeConnectionPath(path string) string {
+	switch strings.ToLower(strings.TrimSpace(path)) {
+	case "direct":
+		return "direct"
+	case "relay", "relayed":
+		return "relayed"
+	case "iroh_virtual":
+		return "direct"
+	default:
+		return "unknown"
+	}
+}
+
+func tunnelHelloNodeID(hello protocol.TunnelHello, transportPeerID string, transportBackend string) (string, error) {
+	nodeID := strings.TrimSpace(hello.NodeID)
+	if nodeID == "" {
+		if transportBackend == netbackend.BackendIroh {
+			return "", fmt.Errorf("tunnel hello is missing DeskAccess node id; upgrade DeskAccess on the client and try again")
+		}
+		return strings.TrimSpace(transportPeerID), nil
+	}
+	if _, err := peer.Decode(nodeID); err != nil {
+		return "", fmt.Errorf("invalid DeskAccess node id in tunnel hello")
+	}
+	return nodeID, nil
+}
+
+func shortPeer(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
 }
 
 func (m *Manager) openDataStream(
@@ -584,6 +889,7 @@ func (m *Manager) openDataStream(
 	// --- client-side handshake ---
 	if err := protocol.WriteFrame(stream, protocol.MsgTunnelHello, protocol.TunnelHello{
 		Version:      protocol.Version,
+		NodeID:       m.n.NodeID(),
 		Method:       "CONNECT",
 		SessionToken: sessionToken,
 		TargetHost:   "127.0.0.1",
@@ -702,6 +1008,35 @@ func (m *Manager) ConnectToPaired(
 	return m.Connect(ctx, peerID, addrs, sessionToken, 0)
 }
 
+func (m *Manager) closeBackendTunnel(peerID string, transportEndpoint string, reason string) {
+	if m == nil || m.backends == nil || strings.TrimSpace(peerID) == "" {
+		return
+	}
+	backendName := netbackend.BackendLibp2pRelay
+	switch {
+	case strings.HasPrefix(transportEndpoint, "quic:"):
+		backendName = netbackend.BackendBitTorrentDHT
+	case strings.TrimSpace(transportEndpoint) != "":
+		backendName = netbackend.BackendIroh
+	}
+	backend, ok := m.backends.Get(backendName)
+	if !ok || backend == nil {
+		return
+	}
+	closer, ok := backend.(netbackend.TunnelCloser)
+	if !ok {
+		return
+	}
+	closed := closer.CloseTunnel(peerID, reason)
+	if closed > 0 {
+		tlog.Info("backend cached tunnel closed",
+			"backend", backendName,
+			"peer", peerID[:12],
+			"count", closed,
+			"reason", reason)
+	}
+}
+
 // LaunchResult is returned by LaunchRDP so callers know what happened.
 type LaunchResult struct {
 	Launched  bool   // true if an RDP client was started
@@ -755,11 +1090,17 @@ func bridge(a, b io.ReadWriteCloser) {
 func bridgeLogged(side, peer, streamID, targetAddr string, a, b io.ReadWriteCloser, bToA string, aToB string) bool {
 	done := make(chan bool, 2)
 	var teardownOnce sync.Once
-	teardown := func(reason, direction string) {
+	logTunnelStreamLifecycle("tunnel stream bridge opened", side, peer, streamID, targetAddr)
+	teardown := func(reason, direction string, abortive bool) {
 		teardownOnce.Do(func() {
 			logTunnelTeardown(side, peer, streamID, targetAddr, reason, direction)
-			a.Close()
-			b.Close()
+			if abortive {
+				closeAbortive(a)
+				closeAbortive(b)
+				return
+			}
+			closeGraceful(a)
+			closeGraceful(b)
 		})
 	}
 	go func() {
@@ -767,9 +1108,9 @@ func bridgeLogged(side, peer, streamID, targetAddr string, a, b io.ReadWriteClos
 		logBridgeCopy(side, peer, streamID, targetAddr, bToA, n, err)
 		failed := bridgeCopyFailed(err)
 		if failed {
-			teardown("copy_error", bToA)
+			teardown("copy_error", bToA, true)
 		} else {
-			teardown("peer_closed", bToA)
+			closeWrite(a)
 		}
 		done <- failed
 	}()
@@ -778,14 +1119,16 @@ func bridgeLogged(side, peer, streamID, targetAddr string, a, b io.ReadWriteClos
 		logBridgeCopy(side, peer, streamID, targetAddr, aToB, n, err)
 		failed := bridgeCopyFailed(err)
 		if failed {
-			teardown("copy_error", aToB)
+			teardown("copy_error", aToB, true)
 		} else {
-			teardown("peer_closed", aToB)
+			closeWrite(b)
 		}
 		done <- failed
 	}()
 	firstFailed := <-done
 	secondFailed := <-done
+	teardown("both_directions_closed", "", false)
+	logTunnelStreamLifecycle("tunnel stream bridge closed", side, peer, streamID, targetAddr)
 	return firstFailed || secondFailed
 }
 
@@ -793,19 +1136,39 @@ func copyWithProgress(dst io.Writer, src io.Reader, side, peer, streamID, target
 	if side != "" {
 		logBridgeProgress("waiting for tunnel bytes", side, peer, streamID, targetAddr, direction, 0)
 	}
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, bridgeWriteBufferSize)
 	var total int64
 	var nextProgress int64 = bridgeProgressEvery
-	first := true
+	readLogs := 0
+	writeLogs := 0
+	var totalBytes atomic.Int64
+	var lastActivityUnixNano atomic.Int64
+	var writeStartedUnixNano atomic.Int64
+	lastActivityUnixNano.Store(time.Now().UnixNano())
+	var idleStop chan struct{}
+	if side != "" {
+		idleStop = make(chan struct{})
+		go bridgeIdleMonitor(side, peer, streamID, targetAddr, direction, &totalBytes, &lastActivityUnixNano, &writeStartedUnixNano, idleStop)
+		defer close(idleStop)
+	}
 	for {
 		nr, er := src.Read(buf)
 		if nr > 0 {
-			nw, ew := dst.Write(buf[:nr])
+			idleBeforeRead := time.Since(time.Unix(0, lastActivityUnixNano.Load()))
+			if side != "" && (readLogs < bridgeInitialReadLogs || idleBeforeRead >= bridgeIdleLogInterval) {
+				logBridgeRead(side, peer, streamID, targetAddr, direction, int64(nr))
+				readLogs++
+			}
+			writeStartedUnixNano.Store(time.Now().UnixNano())
+			nw, ew := writeFullWithDeadline(dst, buf[:nr], side, peer, streamID, targetAddr, direction)
+			writeStartedUnixNano.Store(0)
 			if nw > 0 {
 				total += int64(nw)
-				if side != "" && first {
-					logBridgeProgress("tunnel bytes started", side, peer, streamID, targetAddr, direction, total)
-					first = false
+				totalBytes.Store(total)
+				lastActivityUnixNano.Store(time.Now().UnixNano())
+				if side != "" && (writeLogs < bridgeInitialWriteLogs || idleBeforeRead >= bridgeIdleLogInterval) {
+					logBridgeWrite(side, peer, streamID, targetAddr, direction, int64(nw), total)
+					writeLogs++
 				}
 				if side != "" && total >= nextProgress {
 					logBridgeProgress("tunnel bytes progressing", side, peer, streamID, targetAddr, direction, total)
@@ -825,6 +1188,92 @@ func copyWithProgress(dst io.Writer, src io.Reader, side, peer, streamID, target
 	}
 }
 
+func logBridgeRead(side, peer, streamID, targetAddr, direction string, bytes int64) {
+	msg := "data read from tunnel stream"
+	if side == "client" && direction == "local_to_remote" {
+		msg = "data read from local client"
+	} else if side == "client" && direction == "remote_to_local" {
+		msg = "data read from remote tunnel"
+	} else if side == "host" && direction == "remote_to_service" {
+		msg = "data read from remote tunnel"
+	} else if side == "host" && direction == "service_to_remote" {
+		msg = "data read from host service"
+	}
+	args := []any{
+		"side", side,
+		"peer", peer,
+		"stream_id", streamID,
+		"direction", direction,
+		"bytes", bytes,
+	}
+	if targetAddr != "" {
+		args = appendBridgeEndpointArgs(args, side, targetAddr)
+	}
+	tlog.Debug(msg, args...)
+}
+
+func bridgeIdleMonitor(side, peer, streamID, targetAddr, direction string, totalBytes *atomic.Int64, lastActivityUnixNano *atomic.Int64, writeStartedUnixNano *atomic.Int64, stop <-chan struct{}) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	nextIdleLogAfter := bridgeInitialIdleLogAfter
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			last := time.Unix(0, lastActivityUnixNano.Load())
+			idleFor := time.Since(last)
+			if idleFor >= nextIdleLogAfter {
+				writeStarted := writeStartedUnixNano.Load()
+				writeFor := time.Duration(0)
+				if writeStarted > 0 {
+					writeFor = time.Since(time.Unix(0, writeStarted))
+				}
+				logBridgeIdle(side, peer, streamID, targetAddr, direction, totalBytes.Load(), idleFor, writeFor)
+				nextIdleLogAfter = idleFor + bridgeIdleLogInterval
+			}
+		}
+	}
+}
+
+func writeFullWithDeadline(dst io.Writer, p []byte, side, peer, streamID, targetAddr, direction string) (int, error) {
+	total := 0
+	chunkSize := writeChunkSize(dst)
+	for total < len(p) {
+		end := len(p)
+		if chunkSize > 0 && end-total > chunkSize {
+			end = total + chunkSize
+		}
+		started := time.Now()
+		clearWriteDeadline := setWriteDeadline(dst, time.Now().Add(bridgeWriteTimeout))
+		n, err := dst.Write(p[total:end])
+		clearWriteDeadline()
+		duration := time.Since(started)
+		if side != "" && duration >= bridgeSlowWriteThreshold {
+			logBridgeSlowWrite(side, peer, streamID, targetAddr, direction, n, end-total, duration, err)
+		}
+		if n > 0 {
+			total += n
+		}
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrShortWrite
+		}
+	}
+	return total, nil
+}
+
+func writeChunkSize(dst io.Writer) int {
+	if s, ok := dst.(interface{ WriteChunkSize() int }); ok {
+		if size := s.WriteChunkSize(); size > 0 {
+			return size
+		}
+	}
+	return 0
+}
+
 func logBridgeProgress(msg, side, peer, streamID, targetAddr, direction string, bytes int64) {
 	args := []any{
 		"side", side,
@@ -834,8 +1283,101 @@ func logBridgeProgress(msg, side, peer, streamID, targetAddr, direction string, 
 		"bytes", bytes,
 	}
 	if targetAddr != "" {
-		_, targetPort := splitTargetAddr(targetAddr)
-		args = append(args, "target", targetAddr, "target_port", targetPort)
+		args = appendBridgeEndpointArgs(args, side, targetAddr)
+	}
+	tlog.Debug(msg, args...)
+}
+
+func logBridgeSlowWrite(side, peer, streamID, targetAddr, direction string, bytes int, attempted int, duration time.Duration, err error) {
+	args := []any{
+		"side", side,
+		"peer", peer,
+		"stream_id", streamID,
+		"direction", direction,
+		"bytes", bytes,
+		"attempted", attempted,
+		"duration", duration.String(),
+	}
+	if targetAddr != "" {
+		args = appendBridgeEndpointArgs(args, side, targetAddr)
+	}
+	if err != nil {
+		tlog.Warn("tunnel write slow/failed", append(args, "err", err)...)
+		return
+	}
+	tlog.Warn("tunnel write slow", args...)
+}
+
+func logBridgeIdle(side, peer, streamID, targetAddr, direction string, totalBytes int64, idleFor time.Duration, writeFor time.Duration) {
+	state := "waiting_for_read"
+	if writeFor > 0 {
+		state = "writing"
+	}
+	args := []any{
+		"side", side,
+		"peer", peer,
+		"stream_id", streamID,
+		"direction", direction,
+		"total_bytes", totalBytes,
+		"idle_for", idleFor.Round(time.Second).String(),
+		"state", state,
+	}
+	if writeFor > 0 {
+		args = append(args, "write_for", writeFor.Round(time.Second).String())
+	}
+	if targetAddr != "" {
+		args = appendBridgeEndpointArgs(args, side, targetAddr)
+	}
+	tlog.Info("tunnel bytes idle", args...)
+}
+
+func logBridgeWrite(side, peer, streamID, targetAddr, direction string, bytes int64, total int64) {
+	msg := "tunnel bytes started"
+	if side == "client" && direction == "local_to_remote" {
+		msg = "data written from client to tunnel"
+	} else if side == "host" && direction == "remote_to_service" {
+		msg = "data written from tunnel to host service"
+	} else if side == "client" && direction == "remote_to_local" {
+		msg = "data written from tunnel to local client"
+	} else if side == "host" && direction == "service_to_remote" {
+		msg = "data written from host service to tunnel"
+	}
+	args := []any{
+		"side", side,
+		"peer", peer,
+		"stream_id", streamID,
+		"direction", direction,
+		"bytes", bytes,
+		"total_bytes", total,
+	}
+	if targetAddr != "" {
+		args = appendBridgeEndpointArgs(args, side, targetAddr)
+	}
+	tlog.Info(msg, args...)
+}
+
+func appendBridgeEndpointArgs(args []any, side string, endpointAddr string) []any {
+	if endpointAddr == "" {
+		return args
+	}
+	if side == "client" {
+		return append(args, "client_addr", endpointAddr)
+	}
+	_, targetPort := splitTargetAddr(endpointAddr)
+	return append(args, "target", endpointAddr, "target_port", targetPort)
+}
+
+func logTunnelStreamLifecycle(msg, side, peer, streamID, targetAddr string) {
+	if side == "" {
+		return
+	}
+	args := []any{
+		"side", side,
+		"peer", peer,
+		"stream_id", streamID,
+	}
+	if targetAddr != "" {
+		args = appendBridgeEndpointArgs(args, side, targetAddr)
 	}
 	tlog.Info(msg, args...)
 }
@@ -854,8 +1396,7 @@ func logTunnelTeardown(side, peer, streamID, targetAddr, reason, direction strin
 		args = append(args, "direction", direction)
 	}
 	if targetAddr != "" {
-		_, targetPort := splitTargetAddr(targetAddr)
-		args = append(args, "target", targetAddr, "target_port", targetPort)
+		args = appendBridgeEndpointArgs(args, side, targetAddr)
 	}
 	tlog.Info("tearing down tunnel stream", args...)
 }
@@ -863,8 +1404,7 @@ func logTunnelTeardown(side, peer, streamID, targetAddr, reason, direction strin
 func bridgeCopyFailed(err error) bool {
 	return err != nil &&
 		!errors.Is(err, io.EOF) &&
-		!isUseOfClosedNetworkConnection(err) &&
-		!isConnectionReset(err)
+		!isTunnelClosedError(err)
 }
 
 func logBridgeCopy(side, peer, streamID, targetAddr, direction string, bytes int64, err error) {
@@ -879,12 +1419,14 @@ func logBridgeCopy(side, peer, streamID, targetAddr, direction string, bytes int
 		"bytes", bytes,
 	}
 	if targetAddr != "" {
-		_, targetPort := splitTargetAddr(targetAddr)
-		args = append(args, "target", targetAddr, "target_port", targetPort)
+		args = appendBridgeEndpointArgs(args, side, targetAddr)
 	}
-	if err != nil && !errors.Is(err, io.EOF) && !isUseOfClosedNetworkConnection(err) && !isConnectionReset(err) {
+	if err != nil && !errors.Is(err, io.EOF) && !isTunnelClosedError(err) {
 		tlog.Warn("tunnel copy ended with error", append(args, "err", err)...)
 		return
+	}
+	if cause := bridgeCloseCause(err); cause != "" {
+		args = append(args, "close_cause", cause)
 	}
 	msg := "tunnel copy ended"
 	if side == "host" && direction == "remote_to_service" {
@@ -899,8 +1441,28 @@ func logBridgeCopy(side, peer, streamID, targetAddr, direction string, bytes int
 	tlog.Info(msg, args...)
 }
 
+func bridgeCloseCause(err error) string {
+	switch {
+	case err == nil:
+		return "nil"
+	case errors.Is(err, io.EOF):
+		return "eof"
+	case isTunnelClosedError(err):
+		return "closed"
+	default:
+		return ""
+	}
+}
+
 func isUseOfClosedNetworkConnection(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "use of closed network connection")
+}
+
+func isTunnelClosedError(err error) bool {
+	return errors.Is(err, net.ErrClosed) ||
+		isUseOfClosedNetworkConnection(err) ||
+		isConnectionReset(err) ||
+		isIrohRemoteClosed(err)
 }
 
 func isConnectionReset(err error) bool {
@@ -911,6 +1473,16 @@ func isConnectionReset(err error) bool {
 	return strings.Contains(msg, "connection reset by peer") ||
 		strings.Contains(msg, "forcibly closed by the remote host") ||
 		strings.Contains(msg, "wsarecv")
+}
+
+func isIrohRemoteClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return msg == "internal_error (remote)" ||
+		strings.Contains(msg, "application error 0x0 (remote)") ||
+		strings.Contains(msg, "canceled by remote with error code 0")
 }
 
 func tuneTCPConn(conn net.Conn) {
@@ -929,6 +1501,20 @@ func closeWrite(v any) {
 	}
 }
 
+func closeAbortive(v any) {
+	if ac, ok := v.(interface{ AbortClose() error }); ok {
+		_ = ac.AbortClose()
+		return
+	}
+	closeGraceful(v)
+}
+
+func closeGraceful(v any) {
+	if c, ok := v.(io.Closer); ok {
+		_ = c.Close()
+	}
+}
+
 func setReadDeadline(v any, deadline time.Time) func() {
 	if rd, ok := v.(interface{ SetReadDeadline(time.Time) error }); ok {
 		if err := rd.SetReadDeadline(deadline); err != nil {
@@ -938,6 +1524,21 @@ func setReadDeadline(v any, deadline time.Time) func() {
 		return func() {
 			if err := rd.SetReadDeadline(time.Time{}); err != nil {
 				tlog.Debug("clear read deadline failed", "err", err)
+			}
+		}
+	}
+	return func() {}
+}
+
+func setWriteDeadline(v any, deadline time.Time) func() {
+	if wd, ok := v.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		if err := wd.SetWriteDeadline(deadline); err != nil {
+			tlog.Debug("set write deadline failed", "err", err)
+			return func() {}
+		}
+		return func() {
+			if err := wd.SetWriteDeadline(time.Time{}); err != nil {
+				tlog.Debug("clear write deadline failed", "err", err)
 			}
 		}
 	}

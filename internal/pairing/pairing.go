@@ -32,18 +32,18 @@ import (
 	"github.com/rdpanywhere/rdpanywhere/internal/btdht"
 	"github.com/rdpanywhere/rdpanywhere/internal/config"
 	"github.com/rdpanywhere/rdpanywhere/internal/identity"
-	"github.com/rdpanywhere/rdpanywhere/internal/irohnet"
+	"github.com/rdpanywhere/rdpanywhere/internal/irohsidecar"
 	"github.com/rdpanywhere/rdpanywhere/internal/logger"
 	"github.com/rdpanywhere/rdpanywhere/internal/netbackend"
 	"github.com/rdpanywhere/rdpanywhere/internal/node"
 	"github.com/rdpanywhere/rdpanywhere/internal/protocol"
-	"github.com/rdpanywhere/rdpanywhere/internal/quicnet"
 	"github.com/rdpanywhere/rdpanywhere/internal/rendezvous"
 )
 
 var log = logger.For(logger.CompPairing)
 
 const maxStoredInvites = 500
+const inviteFormatVersion = 1
 
 // invite tracks one generated URL end-to-end.
 type invite struct {
@@ -120,7 +120,7 @@ type presenceProvider interface {
 }
 
 type dhtDiscoverer interface {
-	Lookup(ctx context.Context, publicKeyHex string, expectedNodeID string) ([]string, error)
+	btdht.DirectQUICDiscoverer
 }
 
 type btRecordDiscoverer interface {
@@ -150,10 +150,22 @@ func New(n *node.Node, cfg *config.Config) *Manager {
 		cfg:        cfg,
 		backends:   netbackend.NewRegistry(),
 	}
-	m.backends.Register(netbackend.NewLibp2p(n), netbackend.BackendLibp2pDHT)
-	n.SetPairingHandler(m.handleIncoming)
+	if n.Libp2pRunning() {
+		m.SetLibp2p(true)
+	}
 	go m.sweepLoop()
 	return m
+}
+
+// SetLibp2p registers or unregisters the libp2p backend. The service calls
+// this only after the libp2p backend lifecycle has been started.
+func (m *Manager) SetLibp2p(enabled bool) {
+	if enabled {
+		m.backends.Register(netbackend.NewLibp2p(m.n), netbackend.BackendLibp2pDHT)
+		m.n.SetPairingHandler(m.handleIncoming)
+		return
+	}
+	m.backends.Unregister(netbackend.BackendLibp2pRelay, netbackend.BackendLibp2pDHT)
 }
 
 // SetPresence injects the presence manager after construction (avoids circular dep).
@@ -168,19 +180,31 @@ func (m *Manager) SetDHTDiscoverer(d dhtDiscoverer) {
 	m.mu.Lock()
 	m.dhtDiscoverer = d
 	m.mu.Unlock()
+	if backend, ok := m.backends.Get(netbackend.BackendBitTorrentDHT); ok {
+		if setter, ok := backend.(interface {
+			SetDiscoverer(btdht.DirectQUICDiscoverer)
+		}); ok {
+			if discoverer, ok := d.(btdht.DirectQUICDiscoverer); ok {
+				setter.SetDiscoverer(discoverer)
+			} else {
+				setter.SetDiscoverer(nil)
+			}
+		}
+	}
 }
 
-// SetIroh injects the go-iroh backend.
+// SetIroh injects the iroh sidecar backend.
 func (m *Manager) SetIroh(i interface {
 	TicketContext(ctx context.Context) (string, error)
 	OpenPairing(ctx context.Context, ticket string) (io.ReadWriteCloser, error)
 	OpenTunnel(ctx context.Context, ticket string) (io.ReadWriteCloser, error)
+	CloseTunnel(peerID string, reason string) int
 }) {
 	if i == nil {
 		m.backends.Unregister(netbackend.BackendIroh)
 		return
 	}
-	m.backends.Register(netbackend.NewIroh(i))
+	m.backends.Register(netbackend.NewIrohSidecar(i))
 }
 
 // SetBitTorrentQUIC injects the direct QUIC transport used by BitTorrent DHT.
@@ -192,7 +216,13 @@ func (m *Manager) SetBitTorrentQUIC(q interface {
 		m.backends.Unregister(netbackend.BackendBitTorrentDHT)
 		return
 	}
-	m.backends.Register(netbackend.NewDirectQUIC(q))
+	backend := btdht.NewDirectQUICBackend(q)
+	m.mu.Lock()
+	if discoverer, ok := m.dhtDiscoverer.(btdht.DirectQUICDiscoverer); ok {
+		backend.SetDiscoverer(discoverer)
+	}
+	m.mu.Unlock()
+	m.backends.Register(backend)
 }
 
 // SetIdentity provides local identity metadata for pairing attestation.
@@ -279,6 +309,12 @@ func (m *Manager) generateURL(mode string, ttl time.Duration, label string, prot
 	if mode == "pairing" && relayAddrs == nil {
 		m.DeletePendingPairingInvitesExceptBackend(activeBackend)
 		if url, view := m.findActivePairingInvite(activeBackend); url != "" {
+			log.Info("active pairing invite reused",
+				"invite", view.ID,
+				"backend", activeBackend,
+				"protocol", view.Protocol,
+				"target_port", targetPort,
+				"status", view.Status)
 			return url, view, nil
 		}
 	}
@@ -287,6 +323,13 @@ func (m *Manager) generateURL(mode string, ttl time.Duration, label string, prot
 	// existing active invite for the same mode+proto+port.
 	if mode != "pairing" && ttl == 0 && relayAddrs == nil {
 		if url, view := m.findActiveInvite(mode, proto, uint16(targetPort)); url != "" {
+			log.Info("active invite reused",
+				"invite", view.ID,
+				"mode", mode,
+				"backend", activeBackend,
+				"protocol", view.Protocol,
+				"target_port", targetPort,
+				"status", view.Status)
 			return url, view, nil
 		}
 	}
@@ -375,7 +418,7 @@ func (m *Manager) generateURL(mode string, ttl time.Duration, label string, prot
 		proto = "rdp"
 	}
 
-	encodedURL := t.Encode()
+	encodedURL := withInviteVersion(t.Encode())
 	if relayAddrs == nil {
 		encodedURL = withInviteBackend(encodedURL, activeBackend)
 	}
@@ -389,15 +432,17 @@ func (m *Manager) generateURL(mode string, ttl time.Duration, label string, prot
 		}
 		ticketBackend, ok := irohBackend.(netbackend.TicketBackend)
 		if !ok {
-			return "", nil, fmt.Errorf("iroh backend cannot create invite tickets")
+			return "", nil, fmt.Errorf("iroh backend cannot create endpoint tickets")
 		}
+		log.Info("creating iroh endpoint ticket for DeskAccess invite", "mode", mode, "protocol", proto, "target_port", targetPort)
 		ticketCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		ticket, err := ticketBackend.TicketContext(ticketCtx)
 		cancel()
 		if err != nil {
-			return "", nil, fmt.Errorf("create iroh ticket: %w", err)
+			return "", nil, fmt.Errorf("create iroh endpoint ticket: %w", err)
 		}
-		encodedURL = withIrohTicket(encodedURL, ticket)
+		log.Info("iroh endpoint ticket created for DeskAccess invite", "mode", mode, "protocol", proto, "target_port", targetPort)
+		encodedURL = withIrohEndpointTicket(encodedURL, ticket)
 	}
 
 	inv := &invite{
@@ -426,6 +471,17 @@ func (m *Manager) generateURL(mode string, ttl time.Duration, label string, prot
 
 	view := inv.view()
 	view.ExpiresAt = displayExpiry
+
+	log.Info("invite created",
+		"invite", displayID,
+		"mode", mode,
+		"backend", activeBackend,
+		"protocol", proto,
+		"target_port", targetPort,
+		"expires_at", displayExpiry,
+		"has_expiry", !displayExpiry.IsZero(),
+		"relay_addrs", len(relayAddrs),
+		"iroh_ticket", relayAddrs == nil && activeBackend == "iroh")
 
 	return encodedURL, &view, nil
 }
@@ -586,9 +642,11 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 
 	// Read PairRequest frame
 	log.Info("waiting for pairing request frame", "peer", shortPeer(remotePeerID), "transport_backend", transportBackend)
+	clearReadDeadline := setReadDeadline(s, time.Now().Add(30*time.Second))
 	msgType, payload, err := protocol.ReadFrame(s)
+	clearReadDeadline()
 	if err != nil {
-		log.Error("read pairing frame", "peer", shortPeer(remotePeerID), "err", err)
+		log.Error("read pairing frame", "peer", shortPeer(remotePeerID), "transport_backend", transportBackend, "duration", time.Since(started).String(), "err", err)
 		return
 	}
 	if msgType != protocol.MsgPairRequest {
@@ -610,33 +668,46 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 		}
 		return
 	}
-	if err := verifyIdentityProof(req.Identity, req.Attestation, "request", remotePeerID, m.n.NodeID(), req.InviteID, req.Proof, nil, req.Mode); err != nil {
-		log.Warn("identity proof rejected", "peer", shortPeer(remotePeerID), "err", err)
+	requestPeerID, err := pairRequestNodeID(req, remotePeerID, transportBackend)
+	if err != nil {
+		log.Warn("pairing request rejected because node id is invalid", "transport_peer", shortPeer(remotePeerID), "err", err)
+		if err := protocol.WriteFrame(s, protocol.MsgPairResponse, protocol.PairResponse{
+			OK: false, Message: err.Error(),
+		}); err != nil {
+			log.Warn("write node-id rejection failed", "err", err, "peer", shortPeer(remotePeerID))
+		}
+		return
+	}
+	if requestPeerID != remotePeerID {
+		log.Info("pairing request mapped transport peer to DeskAccess node", "transport_peer", shortPeer(remotePeerID), "node_id", shortPeer(requestPeerID), "transport_backend", transportBackend)
+	}
+	if err := verifyIdentityProof(req.Identity, req.Attestation, "request", requestPeerID, m.n.NodeID(), req.InviteID, req.Proof, nil, req.Mode); err != nil {
+		log.Warn("identity proof rejected", "peer", shortPeer(requestPeerID), "transport_peer", shortPeer(remotePeerID), "err", err)
 		if err := protocol.WriteFrame(s, protocol.MsgPairResponse, protocol.PairResponse{
 			OK: false, Message: "identity proof rejected: " + err.Error(),
 		}); err != nil {
-			log.Warn("write identity rejection failed", "err", err, "peer", shortPeer(remotePeerID))
+			log.Warn("write identity rejection failed", "err", err, "peer", shortPeer(requestPeerID))
 		}
 		return
 	}
 
 	if req.Mode == "trusted" {
-		trusted, ok := m.cfg.TrustedPeer(remotePeerID)
+		trusted, ok := m.cfg.TrustedPeer(requestPeerID)
 		if !ok {
-			log.Warn("trusted reauth rejected — not in trusted list", "peer", shortPeer(remotePeerID))
+			log.Warn("trusted reauth rejected — not in trusted list", "peer", shortPeer(requestPeerID))
 			if err := protocol.WriteFrame(s, protocol.MsgPairResponse, protocol.PairResponse{
 				OK: false, Message: "peer not in trusted list — use an invite link first",
 			}); err != nil {
-				log.Warn("write trusted rejection failed", "err", err, "peer", shortPeer(remotePeerID))
+				log.Warn("write trusted rejection failed", "err", err, "peer", shortPeer(requestPeerID))
 			}
 			return
 		}
 		if err := verifyStoredIdentity(trusted.PublicKey, trusted.MachineID, req.Identity); err != nil {
-			log.Warn("trusted reauth rejected — identity mismatch", "peer", shortPeer(remotePeerID), "err", err)
+			log.Warn("trusted reauth rejected — identity mismatch", "peer", shortPeer(requestPeerID), "err", err)
 			if err := protocol.WriteFrame(s, protocol.MsgPairResponse, protocol.PairResponse{
 				OK: false, Message: "trusted identity mismatch — create a fresh invite link",
 			}); err != nil {
-				log.Warn("write trusted identity rejection failed", "err", err, "peer", shortPeer(remotePeerID))
+				log.Warn("write trusted identity rejection failed", "err", err, "peer", shortPeer(requestPeerID))
 			}
 			return
 		}
@@ -646,14 +717,21 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 		if trusted.TargetPort > 0 {
 			sessionTargetPort = trusted.TargetPort
 		}
+		if req.Protocol != "" {
+			sessionProtocol = rendezvous.ParseProtocol(req.Protocol).String()
+		}
+		if req.TargetPort > 0 {
+			sessionTargetPort = req.TargetPort
+		}
 		log.Info("trusted reauth accepted",
-			"peer", shortPeer(remotePeerID),
+			"peer", shortPeer(requestPeerID),
 			"label", req.Label,
 			"protocol", sessionProtocol,
 			"target_port", sessionTargetPort)
 		backend, hardware, vendor, version, rootThumbprint := identityInfoFromAttestation(req.Attestation)
+		now := time.Now()
 		m.cfg.AddTrustedPeer(config.TrustedPeer{
-			NodeID:            remotePeerID,
+			NodeID:            requestPeerID,
 			Label:             req.Label,
 			PublicKey:         identityProofPublicKeyHex(req.Identity),
 			MachineID:         identityProofMachineID(req.Identity),
@@ -664,17 +742,18 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 			TPMVendor:         vendor,
 			TPMVersion:        version,
 			TPMRootThumbprint: rootThumbprint,
+			LastConnectedAt:   now,
 		})
 		m.cfg.Save()
 	} else {
 		// Invite code path
-		inv, err := m.verifyAndConsume(req.InviteID, req.Proof, remotePeerID, req.Mode)
+		inv, err := m.verifyAndConsume(req.InviteID, req.Proof, requestPeerID, req.Mode)
 		if err != nil {
-			log.Warn("invite proof rejected", "err", err, "peer", shortPeer(remotePeerID))
+			log.Warn("invite proof rejected", "err", err, "peer", shortPeer(requestPeerID))
 			if err := protocol.WriteFrame(s, protocol.MsgPairResponse, protocol.PairResponse{
 				OK: false, Message: err.Error(),
 			}); err != nil {
-				log.Warn("write invite rejection failed", "err", err, "peer", shortPeer(remotePeerID))
+				log.Warn("write invite rejection failed", "err", err, "peer", shortPeer(requestPeerID))
 			}
 			return
 		}
@@ -682,7 +761,7 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 		sessionProtocol = rendezvous.ParseProtocol(inv.Protocol).String()
 		log.Info("invite code accepted",
 			"mode", req.Mode,
-			"peer", shortPeer(remotePeerID),
+			"peer", shortPeer(requestPeerID),
 			"label", req.Label,
 			"invite", inv.ID,
 			"protocol", sessionProtocol,
@@ -691,14 +770,15 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 		// Record who used this invite
 		m.mu.Lock()
 		inv.UsedBy = req.Label
-		inv.UsedByID = remotePeerID
+		inv.UsedByID = requestPeerID
 		inv.UsedAt = time.Now()
 		m.mu.Unlock()
 
 		if req.Mode == "pairing" || req.Mode == "onetime" {
 			backend, hardware, vendor, version, rootThumbprint := identityInfoFromAttestation(req.Attestation)
+			now := time.Now()
 			m.cfg.AddTrustedPeer(config.TrustedPeer{
-				NodeID:            remotePeerID,
+				NodeID:            requestPeerID,
 				Label:             req.Label,
 				PublicKey:         identityProofPublicKeyHex(req.Identity),
 				MachineID:         identityProofMachineID(req.Identity),
@@ -709,6 +789,7 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 				TPMVendor:         vendor,
 				TPMVersion:        version,
 				TPMRootThumbprint: rootThumbprint,
+				LastConnectedAt:   now,
 			})
 			m.cfg.Save()
 		}
@@ -717,24 +798,24 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 	// Issue a short-lived session token bound to the selected app port.
 	// The client MUST open the tunnel stream within SessionTokenTTL.
 	m.mu.Lock()
-	sessionToken, err := m.sessions.Issue(remotePeerID, sessionTargetPort)
+	sessionToken, err := m.sessions.Issue(requestPeerID, sessionTargetPort)
 	m.mu.Unlock()
 	if err != nil {
-		log.Warn("session token issue failed", "peer", shortPeer(remotePeerID), "err", err)
+		log.Warn("session token issue failed", "peer", shortPeer(requestPeerID), "err", err)
 		if writeErr := protocol.WriteFrame(s, protocol.MsgPairResponse, protocol.PairResponse{
 			OK: false, Message: "failed to issue session token",
 		}); writeErr != nil {
-			log.Warn("write session-token failure failed", "err", writeErr, "peer", shortPeer(remotePeerID))
+			log.Warn("write session-token failure failed", "err", writeErr, "peer", shortPeer(requestPeerID))
 		}
 		return
 	}
-	responseProof, err := m.localProof("response", m.n.NodeID(), remotePeerID, req.InviteID, req.Proof, sessionToken, req.Mode, rendezvous.TimeWindow(time.Now()))
+	responseProof, err := m.localProof("response", m.n.NodeID(), requestPeerID, req.InviteID, req.Proof, sessionToken, req.Mode, rendezvous.TimeWindow(time.Now()))
 	if err != nil {
-		log.Warn("response identity proof signing failed", "peer", shortPeer(remotePeerID), "err", err)
+		log.Warn("response identity proof signing failed", "peer", shortPeer(requestPeerID), "err", err)
 		if writeErr := protocol.WriteFrame(s, protocol.MsgPairResponse, protocol.PairResponse{
 			OK: false, Message: "failed to sign identity proof",
 		}); writeErr != nil {
-			log.Warn("write identity-proof failure failed", "err", writeErr, "peer", shortPeer(remotePeerID))
+			log.Warn("write identity-proof failure failed", "err", writeErr, "peer", shortPeer(requestPeerID))
 		}
 		return
 	}
@@ -744,7 +825,7 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 		ticket, ticketErr := m.currentIrohTicket(ticketCtx)
 		cancel()
 		if ticketErr != nil {
-			log.Warn("fresh iroh ticket unavailable for pairing response", "peer", shortPeer(remotePeerID), "err", ticketErr)
+			log.Warn("fresh iroh ticket unavailable for pairing response", "peer", shortPeer(requestPeerID), "err", ticketErr)
 		} else {
 			responseIrohTicket = ticket
 		}
@@ -761,11 +842,11 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 		Attestation:  m.localAttestation(),
 		Identity:     responseProof,
 	}); err != nil {
-		log.Warn("write pairing response failed", "err", err, "peer", shortPeer(remotePeerID))
+		log.Warn("write pairing response failed", "err", err, "peer", shortPeer(requestPeerID))
 		return
 	}
 	log.Info("pairing response sent",
-		"peer", shortPeer(remotePeerID),
+		"peer", shortPeer(requestPeerID),
 		"mode", req.Mode,
 		"transport_backend", transportBackend,
 		"protocol", sessionProtocol,
@@ -833,8 +914,11 @@ func (m *Manager) validInviteProofLocked(inv *invite, proof []byte, remotePeerID
 
 // ConnectByURL parses a deskaccess:// URL and initiates connection.
 func (m *Manager) ConnectByURL(ctx context.Context, rawURL string) (*ConnectResult, error) {
+	if err := validateInviteFormatVersion(rawURL); err != nil {
+		return nil, err
+	}
 	inviteBackend := inviteBackendFromURL(rawURL)
-	irohTicket := irohTicketFromURL(rawURL)
+	irohTicket := irohEndpointTicketFromURL(rawURL)
 	explicitAddrs := inviteAddrsFromURL(rawURL)
 	t, err := rendezvous.DecodeURL(rawURL)
 	if err != nil {
@@ -873,82 +957,33 @@ func (m *Manager) ConnectByURL(ctx context.Context, rawURL string) (*ConnectResu
 	var directQUICAddrs []string
 	if useIroh {
 		if irohTicket == "" {
-			return nil, fmt.Errorf("iroh invite is missing endpoint ticket")
+			return nil, fmt.Errorf("DeskAccess invite is missing the iroh endpoint ticket")
 		}
 		if err := validateIrohTicket(irohTicket, t.PubKey[:]); err != nil {
 			return nil, err
 		}
-	} else if inviteBackend == "bittorrent_dht" {
-		m.mu.Lock()
-		discoverer, _ := m.dhtDiscoverer.(btRecordDiscoverer)
-		m.mu.Unlock()
-		if discoverer != nil {
-			rec, err := discoverer.LookupRecord(ctx, publicKeyHex, peerID)
-			if err == nil {
-				relayAddrs = rec.RelayAddrs
-				directQUICAddrs = rec.DirectQUICAddrs
-				if len(directQUICAddrs) > 0 {
-					directQUICEndpoint = quicnet.Endpoint(publicKeyHex, directQUICAddrs[0])
-				}
-			} else {
-				log.Debug("BitTorrent DHT direct record lookup failed", "peer", peerID[:12], "err", err)
-			}
-		}
-	} else if len(relayAddrs) == 0 {
-		var err error
-		relayAddrs, err = m.resolveInviteAddrsForBackend(ctx, inviteBackend, peerID, publicKeyHex)
-		if err != nil {
-			return nil, fmt.Errorf("no relay addresses in link and DHT discovery failed: %w", err)
-		}
-	}
-	if !useIroh && directQUICEndpoint == "" && len(relayAddrs) == 0 {
-		var err error
-		relayAddrs, err = m.resolveInviteAddrsForBackend(ctx, inviteBackend, peerID, publicKeyHex)
-		if err != nil {
-			return nil, fmt.Errorf("no direct QUIC or relay addresses discovered: %w", err)
-		}
 	}
 
-	var pairingStream io.ReadWriteCloser
-	if useIroh {
-		backend, getErr := m.backends.MustGet(netbackend.BackendIroh)
-		if getErr != nil {
-			return nil, getErr
-		}
-		pairingStream, err = backend.OpenPairing(ctx, netbackend.Target{
-			PeerID:     peerID,
-			IrohTicket: irohTicket,
-		})
-	} else if directQUICEndpoint != "" {
-		backend, getErr := m.backends.MustGet(netbackend.BackendBitTorrentDHT)
-		if getErr != nil {
-			return nil, getErr
-		}
-		pairingStream, err = backend.OpenPairing(ctx, netbackend.Target{
-			PeerID:       peerID,
-			QUICEndpoint: directQUICEndpoint,
-		})
-	} else {
+	openPairingStream := func() (io.ReadWriteCloser, error) {
 		backendName := inviteBackend
 		if backendName == "" {
 			backendName = netbackend.BackendLibp2pRelay
 		}
-		backend, getErr := m.backends.MustGet(backendName)
-		if getErr != nil {
-			return nil, getErr
-		}
-		pairingStream, err = backend.OpenPairing(ctx, netbackend.Target{
-			PeerID:     peerID,
-			RelayAddrs: relayAddrs,
+		session, err := m.backends.OpenPairingSession(ctx, backendName, netbackend.PairingTarget{
+			PeerID:       peerID,
+			PublicKeyHex: publicKeyHex,
+			IrohTicket:   irohTicket,
+			RelayAddrs:   relayAddrs,
 		})
-	}
-	if err != nil {
-		if inviteBackend == netbackend.BackendLibp2pDHT {
-			return nil, fmt.Errorf("libp2p DHT found the host, but direct dial failed; this usually means the host is behind NAT/firewall. Use an iroh or relay invite for this network: %w", err)
+		if err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("cannot reach host (offline or all relays unreachable): %w", err)
+		relayAddrs = session.RelayAddrs
+		irohTicket = session.IrohTicket
+		directQUICAddrs = session.DirectQUICAddrs
+		directQUICEndpoint = session.QUICEndpoint
+		return session.Stream, nil
 	}
-	defer pairingStream.Close()
 
 	// Send PairRequest frame
 	proof := rendezvous.InviteProof(t.InviteSecret[:], t.InviteID[:], peerID, m.n.NodeID(), t.ModeString(), rendezvous.TimeWindow(time.Now()))
@@ -956,22 +991,46 @@ func (m *Manager) ConnectByURL(ctx context.Context, rawURL string) (*ConnectResu
 	if err != nil {
 		return nil, fmt.Errorf("sign identity proof: %w", err)
 	}
-	if err := protocol.WriteFrame(pairingStream, protocol.MsgPairRequest, protocol.PairRequest{
+	var msgType protocol.MsgType
+	var payload []byte
+	pairingStream, openErr := openPairingStream()
+	if openErr != nil {
+		if useIroh && isIrohDirectConnectError(openErr) {
+			return nil, fmt.Errorf("cannot reach host via iroh direct UDP: hole punching/direct path did not complete. Check UDP firewall/NAT on both machines or switch iroh mode back to public relay: %w", openErr)
+		}
+		if inviteBackend == netbackend.BackendLibp2pDHT {
+			return nil, fmt.Errorf("libp2p DHT found the host, but direct dial failed; this usually means the host is behind NAT/firewall. Use an iroh or relay invite for this network: %w", openErr)
+		}
+		return nil, fmt.Errorf("cannot reach host (offline or all relays unreachable): %w", openErr)
+	}
+	log.Info("sending pair request", "peer", shortPeer(peerID), "mode", t.ModeString(), "backend", inviteBackend)
+	clearWriteDeadline := setWriteDeadline(pairingStream, time.Now().Add(30*time.Second))
+	err = protocol.WriteFrame(pairingStream, protocol.MsgPairRequest, protocol.PairRequest{
 		Version:     protocol.Version,
+		NodeID:      m.n.NodeID(),
 		InviteID:    t.InviteID[:],
 		Proof:       proof,
 		Mode:        t.ModeString(),
 		Label:       m.cfg.Node.Label,
 		Attestation: m.localAttestation(),
 		Identity:    identityProof,
-	}); err != nil {
+	})
+	clearWriteDeadline()
+	if err != nil {
+		_ = pairingStream.Close()
 		return nil, fmt.Errorf("send pair request: %w", err)
 	}
+	log.Info("pair request sent", "peer", shortPeer(peerID), "mode", t.ModeString(), "backend", inviteBackend)
 
-	// Read PairResponse frame
-	msgType, payload, err := readFrameWithContext(ctx, pairingStream)
+	const pairResponseTimeout = 30 * time.Second
+	clearReadDeadline := setReadDeadline(pairingStream, time.Now().Add(pairResponseTimeout))
+	log.Info("waiting for pair response", "peer", shortPeer(peerID), "mode", t.ModeString(), "timeout", pairResponseTimeout.String())
+	msgType, payload, err = readFrameWithContext(ctx, pairingStream)
+	clearReadDeadline()
+	_ = pairingStream.Close()
 	if err != nil {
-		return nil, fmt.Errorf("read pair response: %w", err)
+		log.Warn("read pair response failed", "peer", shortPeer(peerID), "mode", t.ModeString(), "err", err)
+		return nil, fmt.Errorf("read pair response: host did not answer within %s: %w", pairResponseTimeout, err)
 	}
 	if msgType != protocol.MsgPairResponse {
 		return nil, fmt.Errorf("unexpected response type 0x%02x", msgType)
@@ -1007,15 +1066,17 @@ func (m *Manager) ConnectByURL(ctx context.Context, rawURL string) (*ConnectResu
 	// Pairing mode: store host as a trusted remote
 	if t.Mode == 1 {
 		backend, hardware, vendor, version, rootThumbprint := identityInfoFromAttestation(resp.Attestation)
+		now := time.Now()
+		storedRelayAddrs := m.storableRelayAddrs(relayAddrs)
 		m.cfg.AddRemote(config.RemoteConfig{
 			Label:             resp.HostLabel,
 			NodeID:            peerID,
-			PublicKey:         hex.EncodeToString(t.PubKey[:]),
+			PublicKey:         identityProofPublicKeyHex(resp.Identity),
 			MachineID:         identityProofMachineID(resp.Identity),
 			Backend:           inviteBackend,
 			Protocol:          t.Protocol.String(),
 			TargetPort:        targetPort,
-			RelayAddrs:        relayAddrs,
+			RelayAddrs:        storedRelayAddrs,
 			IrohTicket:        effectiveIrohTicket,
 			DirectQUICAddrs:   directQUICAddrs,
 			IdentityBackend:   backend,
@@ -1023,19 +1084,7 @@ func (m *Manager) ConnectByURL(ctx context.Context, rawURL string) (*ConnectResu
 			TPMVendor:         vendor,
 			TPMVersion:        version,
 			TPMRootThumbprint: rootThumbprint,
-		})
-		m.cfg.AddTrustedPeer(config.TrustedPeer{
-			NodeID:            peerID,
-			Label:             resp.HostLabel,
-			PublicKey:         identityProofPublicKeyHex(resp.Identity),
-			MachineID:         identityProofMachineID(resp.Identity),
-			Protocol:          t.Protocol.String(),
-			TargetPort:        targetPort,
-			IdentityBackend:   backend,
-			HardwareBacked:    hardware,
-			TPMVendor:         vendor,
-			TPMVersion:        version,
-			TPMRootThumbprint: rootThumbprint,
+			LastConnectedAt:   now,
 		})
 		m.cfg.Save()
 		log.Info("paired successfully", "host", resp.HostLabel, "peer", peerID[:12])
@@ -1070,7 +1119,33 @@ func (m *Manager) RemoteBackend(peerID string) string {
 	return ""
 }
 
+func (m *Manager) RemoteService(key string) (config.RemoteConfig, bool) {
+	for _, r := range m.cfg.Remotes {
+		if config.RemoteServiceKey(r) == key {
+			return r, true
+		}
+	}
+	return config.RemoteConfig{}, false
+}
+
+func (m *Manager) ReauthRemoteWithBackend(ctx context.Context, remote config.RemoteConfig, preferredBackend string) (*ConnectResult, error) {
+	if strings.TrimSpace(remote.NodeID) == "" {
+		return nil, fmt.Errorf("paired machine is missing node id")
+	}
+	return m.reauthRemoteWithBackend(ctx, remote, preferredBackend)
+}
+
 func (m *Manager) ReauthPairedWithBackend(ctx context.Context, peerID string, preferredBackend string) (*ConnectResult, error) {
+	for _, r := range m.cfg.Remotes {
+		if r.NodeID == peerID {
+			return m.reauthRemoteWithBackend(ctx, r, preferredBackend)
+		}
+	}
+	return m.reauthRemoteWithBackend(ctx, config.RemoteConfig{NodeID: peerID}, preferredBackend)
+}
+
+func (m *Manager) reauthRemoteWithBackend(ctx context.Context, remote config.RemoteConfig, preferredBackend string) (*ConnectResult, error) {
+	peerID := remote.NodeID
 	// Tier 1: live addrs from presence (best — most recent)
 	var presenceAddrs []string
 	if m.presence != nil {
@@ -1081,25 +1156,19 @@ func (m *Manager) ReauthPairedWithBackend(ctx context.Context, peerID string, pr
 	var storedAddrs []string
 	var storedQUICAddrs []string
 	var publicKey string
-	var publicKeyBytes []byte
 	var irohTicket string
 	var storedMachineID string
 	storedProtocol := ""
 	storedTargetPort := 0
 	storedBackend := ""
-	for _, r := range m.cfg.Remotes {
-		if r.NodeID == peerID {
-			storedAddrs = r.RelayAddrs
-			storedQUICAddrs = r.DirectQUICAddrs
-			publicKey = r.PublicKey
-			irohTicket = r.IrohTicket
-			storedMachineID = r.MachineID
-			storedProtocol = r.Protocol
-			storedTargetPort = r.TargetPort
-			storedBackend = r.Backend
-			break
-		}
-	}
+	storedAddrs = remote.RelayAddrs
+	storedQUICAddrs = remote.DirectQUICAddrs
+	publicKey = remote.PublicKey
+	irohTicket = remote.IrohTicket
+	storedMachineID = remote.MachineID
+	storedProtocol = remote.Protocol
+	storedTargetPort = remote.TargetPort
+	storedBackend = remote.Backend
 	backend := strings.TrimSpace(preferredBackend)
 	if backend == "" {
 		backend = strings.TrimSpace(storedBackend)
@@ -1112,105 +1181,46 @@ func (m *Manager) ReauthPairedWithBackend(ctx context.Context, peerID string, pr
 		if irohTicket == "" {
 			return nil, fmt.Errorf("paired remote has no iroh ticket — use a fresh invite link")
 		}
-		if publicKey != "" {
-			var err error
-			publicKeyBytes, err = hex.DecodeString(publicKey)
-			if err != nil {
-				return nil, fmt.Errorf("decode stored public key: %w", err)
-			}
-			if err := validateIrohTicket(irohTicket, publicKeyBytes); err != nil {
-				return nil, err
-			}
+		if err := validateIrohTicketPeer(irohTicket, peerID); err != nil {
+			return nil, err
 		}
-		irohBackend, getErr := m.backends.MustGet(netbackend.BackendIroh)
-		if getErr != nil {
-			return nil, getErr
-		}
-		log.Info("opening iroh pairing stream for trusted reauth", "peer", shortPeer(peerID))
-		pairingStream, err := irohBackend.OpenPairing(ctx, netbackend.Target{
+		log.Info("opening backend pairing session for trusted reauth", "peer", shortPeer(peerID), "backend", backend)
+		session, err := m.backends.OpenPairingSession(ctx, backend, netbackend.PairingTarget{
 			PeerID:     peerID,
 			IrohTicket: irohTicket,
 		})
 		if err != nil {
 			log.Warn("open iroh pairing stream for trusted reauth failed", "peer", shortPeer(peerID), "has_ticket", irohTicket != "", "err", err)
+			if isIrohDirectConnectError(err) {
+				return nil, fmt.Errorf("cannot reach paired host via iroh direct UDP: hole punching/direct path did not complete. Check UDP firewall/NAT on both machines or switch iroh mode back to public relay: %w", err)
+			}
+			if isIrohOpenTimeout(err) {
+				return nil, fmt.Errorf("cannot reach paired host via iroh: opening the sidecar stream timed out. The host may be offline, mobile internet may be blocking or delaying iroh relay/direct negotiation, or the saved iroh ticket may be stale; create a fresh iroh pairing link from the host if this repeats: %w", err)
+			}
 			return nil, fmt.Errorf("cannot reach paired host via iroh (host may be offline, not running the iroh backend, or this saved iroh ticket is stale; create a fresh iroh pairing link from the host): %w", err)
 		}
-		return m.reauthOverStream(ctx, peerID, pairingStream, nil, irohTicket, nil, "", storedProtocol, storedTargetPort, backend, publicKey, storedMachineID)
+		return m.reauthOverStream(ctx, peerID, session.Stream, session.RelayAddrs, session.IrohTicket, session.DirectQUICAddrs, session.QUICEndpoint, storedProtocol, storedTargetPort, backend, publicKey, storedMachineID)
 	}
 
-	var btAddrs []string
-	directQUICAddrs := storedQUICAddrs
-	directQUICEndpoint := ""
-	m.mu.Lock()
-	discoverer := m.dhtDiscoverer
-	recordDiscoverer, _ := m.dhtDiscoverer.(btRecordDiscoverer)
-	m.mu.Unlock()
-	if backend == "bittorrent_dht" && recordDiscoverer != nil && publicKey != "" {
-		lookupCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
-		rec, err := recordDiscoverer.LookupRecord(lookupCtx, publicKey, peerID)
-		cancel()
-		if err != nil {
-			log.Debug("BitTorrent DHT record lookup failed", "peer", peerID[:12], "err", err)
-		} else {
-			btAddrs = rec.RelayAddrs
-			directQUICAddrs = rec.DirectQUICAddrs
-		}
-	} else if discoverer != nil && publicKey != "" {
-		lookupCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
-		addrs, err := discoverer.Lookup(lookupCtx, publicKey, peerID)
-		cancel()
-		if err != nil {
-			log.Debug("BitTorrent DHT lookup failed", "peer", peerID[:12], "err", err)
-		} else {
-			btAddrs = addrs
-		}
-	}
-	if backend == "bittorrent_dht" && len(directQUICAddrs) > 0 && publicKey != "" {
-		directQUICEndpoint = quicnet.Endpoint(publicKey, directQUICAddrs[0])
-		quicBackend, getErr := m.backends.MustGet(netbackend.BackendBitTorrentDHT)
-		if getErr != nil {
-			return nil, getErr
-		}
-		pairingStream, err := quicBackend.OpenPairing(ctx, netbackend.Target{
-			PeerID:       peerID,
-			QUICEndpoint: directQUICEndpoint,
-		})
-		if err == nil {
-			return m.reauthOverStream(ctx, peerID, pairingStream, nil, "", directQUICAddrs, directQUICEndpoint, storedProtocol, storedTargetPort, backend, publicKey, storedMachineID)
-		}
-		log.Debug("direct QUIC reauth failed, falling back to relay", "peer", peerID[:12], "err", err)
-	}
-
-	// Resolve: tries all candidate tiers in parallel, first to connect wins
-	resolved, err := m.n.ResolveAddrs(ctx, peerID, presenceAddrs, storedAddrs, btAddrs)
+	log.Info("opening backend pairing session for trusted reauth", "peer", shortPeer(peerID), "backend", backend)
+	session, err := m.backends.OpenPairingSession(ctx, backend, netbackend.PairingTarget{
+		PeerID:          peerID,
+		PublicKeyHex:    publicKey,
+		RelayAddrs:      storedAddrs,
+		PresenceAddrs:   presenceAddrs,
+		StoredAddrs:     storedAddrs,
+		DirectQUICAddrs: storedQUICAddrs,
+	})
 	if err != nil {
+		if backend == netbackend.BackendBitTorrentDHT {
+			return nil, fmt.Errorf("cannot reach paired host via BitTorrent DHT direct QUIC: %w", err)
+		}
 		if backend == netbackend.BackendLibp2pDHT {
 			return nil, fmt.Errorf("libp2p DHT resolved this paired host, but direct dial failed; use an iroh or relay pairing for NATed networks: %w", err)
 		}
 		return nil, fmt.Errorf("cannot reach %s: %w", peerID[:12], err)
 	}
-	relayAddrs := resolved.RelayAddrs
-	log.Info("reauth resolved", "peer", peerID[:12], "source", resolved.Source)
-
-	libp2pBackendName := backend
-	if libp2pBackendName != netbackend.BackendLibp2pDHT {
-		libp2pBackendName = netbackend.BackendLibp2pRelay
-	}
-	libp2pBackend, getErr := m.backends.MustGet(libp2pBackendName)
-	if getErr != nil {
-		return nil, getErr
-	}
-	pairingStream, err := libp2pBackend.OpenPairing(ctx, netbackend.Target{
-		PeerID:     peerID,
-		RelayAddrs: relayAddrs,
-	})
-	if err != nil {
-		if backend == netbackend.BackendLibp2pDHT {
-			return nil, fmt.Errorf("libp2p DHT resolved this paired host, but direct pairing dial failed; use an iroh or relay pairing for NATed networks: %w", err)
-		}
-		return nil, fmt.Errorf("cannot reach paired host: %w", err)
-	}
-	return m.reauthOverStream(ctx, peerID, pairingStream, relayAddrs, "", nil, "", storedProtocol, storedTargetPort, backend, publicKey, storedMachineID)
+	return m.reauthOverStream(ctx, peerID, session.Stream, session.RelayAddrs, session.IrohTicket, session.DirectQUICAddrs, session.QUICEndpoint, storedProtocol, storedTargetPort, backend, publicKey, storedMachineID)
 }
 
 func (m *Manager) reauthOverStream(ctx context.Context, peerID string, pairingStream io.ReadWriteCloser, relayAddrs []string, irohTicket string, directQUICAddrs []string, quicEndpoint string, storedProtocol string, storedTargetPort int, networkBackend string, publicKey string, storedMachineID string) (*ConnectResult, error) {
@@ -1224,8 +1234,11 @@ func (m *Manager) reauthOverStream(ctx context.Context, peerID string, pairingSt
 	}
 	if err := protocol.WriteFrame(pairingStream, protocol.MsgPairRequest, protocol.PairRequest{
 		Version:     protocol.Version,
+		NodeID:      m.n.NodeID(),
 		Mode:        "trusted",
 		Label:       m.cfg.Node.Label,
+		Protocol:    storedProtocol,
+		TargetPort:  storedTargetPort,
 		Attestation: m.localAttestation(),
 		Identity:    identityProof,
 	}); err != nil {
@@ -1261,22 +1274,21 @@ func (m *Manager) reauthOverStream(ctx context.Context, peerID string, pairingSt
 		return nil, fmt.Errorf("host identity proof rejected: %w", err)
 	}
 	if err := verifyStoredIdentity(publicKey, storedMachineID, resp.Identity); err != nil {
-		return nil, fmt.Errorf("host identity changed; create a fresh invite link: %w", err)
+		if canRepairStoredSoftwarePublicKey(err, storedMachineID, resp.Identity) {
+			repaired := identityProofPublicKeyHex(resp.Identity)
+			log.Warn("repairing stored host software public key after verified machine ID match",
+				"peer", shortPeer(peerID),
+				"machine_id", shortPeer(storedMachineID),
+			)
+			publicKey = repaired
+		} else {
+			return nil, fmt.Errorf("host identity changed; create a fresh invite link: %w", err)
+		}
 	}
 	effectiveIrohTicket := irohTicket
 	if resp.IrohTicket != "" {
-		var publicKeyBytes []byte
-		if len(publicKeyBytes) == 0 && publicKey != "" {
-			var err error
-			publicKeyBytes, err = hex.DecodeString(publicKey)
-			if err != nil {
-				return nil, fmt.Errorf("decode stored public key: %w", err)
-			}
-		}
-		if len(publicKeyBytes) > 0 {
-			if err := validateIrohTicket(resp.IrohTicket, publicKeyBytes); err != nil {
-				return nil, fmt.Errorf("host refreshed iroh ticket rejected: %w", err)
-			}
+		if err := validateIrohTicketPeer(resp.IrohTicket, peerID); err != nil {
+			return nil, fmt.Errorf("host refreshed iroh ticket rejected: %w", err)
 		}
 		effectiveIrohTicket = resp.IrohTicket
 		log.Info("refreshed iroh ticket received during trusted reauth", "peer", shortPeer(peerID))
@@ -1298,14 +1310,17 @@ func (m *Manager) reauthOverStream(ctx context.Context, peerID string, pairingSt
 	savedRemote := false
 	if resp.Identity != nil {
 		identityBackend, hardware, vendor, version, rootThumbprint := identityInfoFromAttestation(resp.Attestation)
+		now := time.Now()
+		storedRelayAddrs := m.storableRelayAddrs(relayAddrs)
 		m.cfg.AddRemote(config.RemoteConfig{
 			Label:             resp.HostLabel,
 			NodeID:            peerID,
+			PublicKey:         identityProofPublicKeyHex(resp.Identity),
 			Backend:           networkBackend,
 			Protocol:          resultProtocol,
 			TargetPort:        resultTargetPort,
 			MachineID:         identityProofMachineID(resp.Identity),
-			RelayAddrs:        relayAddrs,
+			RelayAddrs:        storedRelayAddrs,
 			IrohTicket:        effectiveIrohTicket,
 			DirectQUICAddrs:   directQUICAddrs,
 			IdentityBackend:   identityBackend,
@@ -1313,24 +1328,13 @@ func (m *Manager) reauthOverStream(ctx context.Context, peerID string, pairingSt
 			TPMVendor:         vendor,
 			TPMVersion:        version,
 			TPMRootThumbprint: rootThumbprint,
-		})
-		m.cfg.AddTrustedPeer(config.TrustedPeer{
-			NodeID:            peerID,
-			Label:             resp.HostLabel,
-			PublicKey:         identityProofPublicKeyHex(resp.Identity),
-			MachineID:         identityProofMachineID(resp.Identity),
-			Protocol:          resultProtocol,
-			TargetPort:        resultTargetPort,
-			IdentityBackend:   identityBackend,
-			HardwareBacked:    hardware,
-			TPMVendor:         vendor,
-			TPMVersion:        version,
-			TPMRootThumbprint: rootThumbprint,
+			LastConnectedAt:   now,
 		})
 		m.cfg.Save()
 		savedRemote = true
 	}
 	if resp.IrohTicket != "" && !savedRemote {
+		storedRelayAddrs := m.storableRelayAddrs(relayAddrs)
 		m.cfg.AddRemote(config.RemoteConfig{
 			Label:      resp.HostLabel,
 			NodeID:     peerID,
@@ -1338,7 +1342,7 @@ func (m *Manager) reauthOverStream(ctx context.Context, peerID string, pairingSt
 			Protocol:   resultProtocol,
 			TargetPort: resultTargetPort,
 			IrohTicket: effectiveIrohTicket,
-			RelayAddrs: relayAddrs,
+			RelayAddrs: storedRelayAddrs,
 		})
 		m.cfg.Save()
 	}
@@ -1354,6 +1358,37 @@ func (m *Manager) reauthOverStream(ctx context.Context, peerID string, pairingSt
 		TargetPort:             resultTargetPort,
 		SessionToken:           resp.SessionToken,
 	}, nil
+}
+
+func (m *Manager) storableRelayAddrs(relayAddrs []string) []string {
+	if m != nil && m.n != nil && m.n.AllowsLoopbackDial() {
+		out := make([]string, len(relayAddrs))
+		copy(out, relayAddrs)
+		return out
+	}
+	return node.FilterExternallyDialableAddrs(relayAddrs)
+}
+
+func isIrohDirectConnectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "direct udp connect failed") ||
+		strings.Contains(msg, "relay disabled") ||
+		strings.Contains(msg, "hole punching/direct path did not complete")
+}
+
+func isIrohOpenTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "/open") &&
+		(strings.Contains(msg, "timed out") ||
+			strings.Contains(msg, "timeout") ||
+			strings.Contains(msg, "deadline exceeded") ||
+			strings.Contains(msg, "awaiting headers"))
 }
 
 func setReadDeadline(stream io.ReadWriteCloser, deadline time.Time) func() {
@@ -1372,6 +1407,25 @@ func setReadDeadline(stream io.ReadWriteCloser, deadline time.Time) func() {
 		}
 	}
 	log.Debug("stream read deadline unsupported")
+	return func() {}
+}
+
+func setWriteDeadline(stream io.ReadWriteCloser, deadline time.Time) func() {
+	type writeDeadliner interface {
+		SetWriteDeadline(time.Time) error
+	}
+	if wd, ok := stream.(writeDeadliner); ok {
+		if err := wd.SetWriteDeadline(deadline); err != nil {
+			log.Debug("set stream write deadline failed", "err", err)
+			return func() {}
+		}
+		return func() {
+			if err := wd.SetWriteDeadline(time.Time{}); err != nil {
+				log.Debug("clear stream write deadline failed", "err", err)
+			}
+		}
+	}
+	log.Debug("stream write deadline unsupported")
 	return func() {}
 }
 
@@ -1437,14 +1491,8 @@ func (m *Manager) DiscoverRemote(ctx context.Context, remote config.RemoteConfig
 		if ticket == "" {
 			return DiscoveryStatus{Source: "iroh", Error: "paired remote has no iroh ticket"}
 		}
-		if publicKey != "" {
-			publicKeyBytes, err := hex.DecodeString(publicKey)
-			if err != nil {
-				return DiscoveryStatus{Source: "iroh", Error: "decode stored public key: " + err.Error()}
-			}
-			if err := validateIrohTicket(ticket, publicKeyBytes); err != nil {
-				return DiscoveryStatus{Source: "iroh", Error: err.Error()}
-			}
+		if err := validateIrohTicketPeer(ticket, remote.NodeID); err != nil {
+			return DiscoveryStatus{Source: "iroh", Error: err.Error()}
 		}
 		return DiscoveryStatus{Source: "iroh_cached_ticket", Addrs: []string{"iroh"}, Error: "iroh reachability is checked during connect"}
 	case "libp2p_dht":
@@ -1526,70 +1574,24 @@ func (m *Manager) bitTorrentDHTEnabled() bool {
 	return m.activeNetworkBackend() == "bittorrent_dht"
 }
 
-func (m *Manager) resolveInviteAddrs(ctx context.Context, peerID string, publicKeyHex string) ([]string, error) {
-	return m.resolveInviteAddrsForBackend(ctx, m.activeNetworkBackend(), peerID, publicKeyHex)
-}
-
-func (m *Manager) resolveInviteAddrsForBackend(ctx context.Context, backend string, peerID string, publicKeyHex string) ([]string, error) {
-	var errs []string
-	if backend == netbackend.BackendLibp2pDHT {
-		log.Info("invite discovery using libp2p DHT identity provider", "peer", shortPeer(peerID))
-		identityCtx, identityCancel := context.WithTimeout(ctx, 45*time.Second)
-		addrs, err := m.n.FindIdentityAddrs(identityCtx, publicKeyHex, peerID)
-		identityCancel()
-		if err == nil {
-			log.Info("invite peer resolved via libp2p DHT identity provider", "peer", peerID[:12], "addrs", len(addrs))
-			return addrs, nil
-		}
-		errs = append(errs, "libp2p DHT identity provider: "+err.Error())
-
-		log.Info("invite discovery using libp2p DHT peer lookup", "peer", shortPeer(peerID))
-		lookupCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		addrs, err = m.n.FindPeerAddrs(lookupCtx, peerID)
-		cancel()
-		if err == nil && len(addrs) > 0 {
-			log.Info("invite peer resolved via libp2p DHT", "peer", peerID[:12], "addrs", len(addrs))
-			return addrs, nil
-		}
-		if err != nil {
-			errs = append(errs, "libp2p DHT: "+err.Error())
-		}
-		if len(errs) == 0 {
-			return nil, fmt.Errorf("libp2p DHT returned no direct addresses")
-		}
-		return nil, fmt.Errorf("%s", strings.Join(errs, "; "))
-	}
-
-	m.mu.Lock()
-	discoverer := m.dhtDiscoverer
-	m.mu.Unlock()
-	if backend == "bittorrent_dht" && discoverer != nil && publicKeyHex != "" {
-		log.Info("invite discovery using BitTorrent DHT", "peer", shortPeer(peerID), "public_key", shortPeer(publicKeyHex))
-		lookupCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
-		addrs, err := discoverer.Lookup(lookupCtx, publicKeyHex, peerID)
-		cancel()
-		if err == nil && len(addrs) > 0 {
-			log.Info("invite peer resolved via BitTorrent DHT", "peer", peerID[:12], "addrs", len(addrs))
-			return addrs, nil
-		}
-		if err != nil {
-			errs = append(errs, "BitTorrent DHT: "+err.Error())
-		}
-	}
-
-	if len(errs) == 0 {
-		return nil, fmt.Errorf("no discovery backend enabled for %s", backend)
-	}
-	return nil, fmt.Errorf("%s", strings.Join(errs, "; "))
-}
-
-func withIrohTicket(rawURL string, ticket string) string {
+func withIrohEndpointTicket(rawURL string, ticket string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return rawURL
 	}
 	q := u.Query()
-	q.Set("iroh", ticket)
+	q.Set("iroh_ticket", ticket)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func withInviteVersion(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	q := u.Query()
+	q.Set("v", strconv.Itoa(inviteFormatVersion))
 	u.RawQuery = q.Encode()
 	return u.String()
 }
@@ -1625,12 +1627,12 @@ func withInviteAddrs(rawURL string, peerID string, addrs []string) string {
 	return u.String()
 }
 
-func irohTicketFromURL(rawURL string) string {
+func irohEndpointTicketFromURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return ""
 	}
-	return u.Query().Get("iroh")
+	return u.Query().Get("iroh_ticket")
 }
 
 func inviteBackendFromURL(rawURL string) string {
@@ -1646,14 +1648,14 @@ func inviteBackendFromURL(rawURL string) string {
 	}
 }
 
-// InviteNetworkBackend returns the backend requested by an invite URL, when
-// one is encoded. If the URL carries an iroh ticket, iroh is required even for
-// older links that did not include backend=iroh explicitly.
+// InviteNetworkBackend returns the backend requested by a DeskAccess invite URL.
+// If the URL carries an iroh endpoint ticket, iroh is required even when the
+// backend field is missing.
 func InviteNetworkBackend(rawURL string) string {
 	if backend := inviteBackendFromURL(rawURL); backend != "" {
 		return backend
 	}
-	if irohTicketFromURL(rawURL) != "" {
+	if irohEndpointTicketFromURL(rawURL) != "" {
 		return "iroh"
 	}
 	return ""
@@ -1694,16 +1696,51 @@ func invitePeerFromURL(rawURL string) string {
 	return u.Query().Get("peer")
 }
 
-func validateIrohTicket(ticket string, publicKey []byte) error {
-	id, err := irohnet.TicketEndpointID(ticket)
+func validateInviteFormatVersion(rawURL string) error {
+	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("invalid iroh ticket: %w", err)
+		return fmt.Errorf("invalid link: %w", err)
 	}
-	got := id.Bytes()
-	if !strings.EqualFold(hex.EncodeToString(got[:]), hex.EncodeToString(publicKey)) {
-		return fmt.Errorf("iroh ticket does not match invite identity")
+	rawVersion := strings.TrimSpace(u.Query().Get("v"))
+	if rawVersion == "" {
+		return nil
+	}
+	version, err := strconv.Atoi(rawVersion)
+	if err != nil || version <= 0 {
+		return fmt.Errorf("this DeskAccess invite uses an invalid invite format version; ask the host to generate a new link")
+	}
+	if version > inviteFormatVersion {
+		return fmt.Errorf("this DeskAccess invite uses format v%d, but this app only supports v%d; upgrade DeskAccess and try again", version, inviteFormatVersion)
 	}
 	return nil
+}
+
+func validateIrohTicket(ticket string, publicKey []byte) error {
+	if !irohsidecar.IsTicket(ticket) {
+		return fmt.Errorf("invalid iroh sidecar ticket")
+	}
+	return nil
+}
+
+func validateIrohTicketPeer(ticket string, peerID string) error {
+	if !irohsidecar.IsTicket(ticket) {
+		return fmt.Errorf("invalid iroh sidecar ticket")
+	}
+	return nil
+}
+
+func pairRequestNodeID(req protocol.PairRequest, transportPeerID string, transportBackend string) (string, error) {
+	nodeID := strings.TrimSpace(req.NodeID)
+	if nodeID == "" {
+		if transportBackend == netbackend.BackendIroh {
+			return "", fmt.Errorf("pairing request is missing DeskAccess node id; upgrade DeskAccess on the client and try again")
+		}
+		return strings.TrimSpace(transportPeerID), nil
+	}
+	if _, err := peer.Decode(nodeID); err != nil {
+		return "", fmt.Errorf("invalid DeskAccess node id in pairing request")
+	}
+	return nodeID, nil
 }
 
 func (m *Manager) localAttestation() *protocol.TPMAttestation {
@@ -1808,6 +1845,20 @@ func verifyStoredIdentity(storedPublicKey string, storedMachineID string, proof 
 		}
 	}
 	return nil
+}
+
+func canRepairStoredSoftwarePublicKey(err error, storedMachineID string, proof *protocol.IdentityProof) bool {
+	if err == nil || proof == nil {
+		return false
+	}
+	if !strings.Contains(err.Error(), "software public key mismatch") {
+		return false
+	}
+	storedMachineID = strings.TrimSpace(storedMachineID)
+	if storedMachineID == "" || proof.MachineID == "" {
+		return false
+	}
+	return strings.EqualFold(storedMachineID, proof.MachineID)
 }
 
 func identityProofMachineID(proof *protocol.IdentityProof) string {

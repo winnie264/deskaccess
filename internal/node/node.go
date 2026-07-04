@@ -72,13 +72,14 @@ type Node struct {
 	PeerID peer.ID
 	cfg    *config.Config
 
-	mu                sync.RWMutex
-	relayAddrs        []multiaddr.Multiaddr
-	relayInfos        []peer.AddrInfo
-	relayRefusedUntil []time.Time // indexed same as relayInfos; zero = not refused
-	onAddrsChange     func([]string)
-	lastRelayErr      string
-	lastDHTErr        string
+	mu                  sync.RWMutex
+	activeLibp2pBackend string
+	relayAddrs          []multiaddr.Multiaddr
+	relayInfos          []peer.AddrInfo
+	relayRefusedUntil   []time.Time // indexed same as relayInfos; zero = not refused
+	onAddrsChange       func([]string)
+	lastRelayErr        string
+	lastDHTErr          string
 
 	dhtClient *dht.Client // nil until DHT bootstraps; used for relay fallback + peer lookup
 
@@ -89,6 +90,10 @@ type Node struct {
 	// testRelayMask overrides RelayMask() when non-zero.
 	// Set by NewFromHost for in-process test nodes.
 	testRelayMask byte
+	// allowLoopbackDial is set only by NewFromHost for in-process tests.
+	// Production nodes must not use loopback addrs learned from invites,
+	// presence, DHT, or saved config because they point back to this client.
+	allowLoopbackDial bool
 }
 
 func New(ctx context.Context, cfg *config.Config) (*Node, error) {
@@ -100,37 +105,61 @@ func New(ctx context.Context, cfg *config.Config) (*Node, error) {
 	if err != nil {
 		return nil, logger.Wrap("unmarshal libp2p key", err)
 	}
+	pid, err := peer.IDFromPrivateKey(libp2pPriv)
+	if err != nil {
+		return nil, logger.Wrap("derive peer id", err)
+	}
 
+	n := &Node{PeerID: pid, cfg: cfg}
+	n.activeLibp2pBackend = n.configuredLibp2pBackend()
+	if !n.libp2pActive() {
+		log.Info("libp2p host disabled for selected backend", "peer_id", pid.String(), "share_backend", cfg.ActiveNetworkBackend())
+		return n, nil
+	}
+	if err := n.startLibp2pHost(ctx, libp2pPriv); err != nil {
+		return nil, err
+	}
+	return n, nil
+}
+
+func (n *Node) startLibp2pHost(ctx context.Context, libp2pPriv libp2pcrypto.PrivKey) error {
+	if n == nil {
+		return nil
+	}
+	if n.Host != nil {
+		return nil
+	}
 	cm, err := connmgr.NewConnManager(50, 200)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	opts := []libp2p.Option{
 		libp2p.Identity(libp2pPriv),
 		libp2p.ConnectionManager(cm),
-		libp2p.ListenAddrStrings(
-			"/ip4/0.0.0.0/tcp/0",
-			"/ip4/0.0.0.0/udp/0/quic-v1",
-			"/ip6/::/tcp/0",
-			"/ip6/::/udp/0/quic-v1",
-		),
 		libp2p.EnableNATService(),
 		libp2p.EnableHolePunching(),
 	}
+	opts = append(opts, libp2p.ListenAddrStrings(
+		"/ip4/0.0.0.0/tcp/0",
+		"/ip4/0.0.0.0/udp/0/quic-v1",
+		"/ip6/::/tcp/0",
+		"/ip6/::/udp/0/quic-v1",
+	))
 
-	if cfg.Relay.Mode == "custom" && len(cfg.Relay.Allowlist) > 0 {
+	if n.cfg.Relay.Mode == "custom" && len(n.cfg.Relay.Allowlist) > 0 {
 		opts = append(opts, libp2p.ConnectionGater(
-			&allowlistGater{allowed: cfg.Relay.Allowlist},
+			&allowlistGater{allowed: n.cfg.Relay.Allowlist},
 		))
 	}
 
 	h, err := libp2p.New(opts...)
 	if err != nil {
-		return nil, logger.Wrap("create libp2p host", err)
+		return logger.Wrap("create libp2p host", err)
 	}
 
-	n := &Node{Host: h, PeerID: h.ID(), cfg: cfg}
+	n.Host = h
+	n.PeerID = h.ID()
 
 	relayInfos, err := n.resolveRelays()
 	if err != nil {
@@ -163,28 +192,33 @@ func New(ctx context.Context, cfg *config.Config) (*Node, error) {
 		log.Info("node online",
 			"peer_id", h.ID().String(),
 			"relay_addrs", len(n.relayAddrs),
-			"label", cfg.Node.Label,
+			"label", n.cfg.Node.Label,
 		)
 	} else {
 		log.Warn("node online (no relay — direct connections only)",
 			"peer_id", h.ID().String(),
-			"label", cfg.Node.Label,
+			"label", n.cfg.Node.Label,
 		)
 	}
 
 	n.startRelayLoops(ctx)
 	n.startDHT(ctx)
 
-	return n, nil
+	return nil
 }
 
 // ApplyNetworkConfig re-reads the current config and applies relay/DHT changes
 // without restarting the process or replacing the libp2p host identity.
 func (n *Node) ApplyNetworkConfig(ctx context.Context) error {
+	return n.applyNetworkConfig(ctx, n.configuredLibp2pBackend())
+}
+
+func (n *Node) applyNetworkConfig(ctx context.Context, activeBackend string) error {
 	if n == nil {
 		return nil
 	}
 	n.mu.Lock()
+	n.activeLibp2pBackend = activeBackend
 	if n.relayCancel != nil {
 		n.relayCancel()
 		n.relayCancel = nil
@@ -201,6 +235,25 @@ func (n *Node) ApplyNetworkConfig(ctx context.Context) error {
 	n.mu.Unlock()
 	if oldDHT != nil {
 		_ = oldDHT.Close()
+	}
+
+	if !n.libp2pActive() {
+		return n.StopLibp2p(ctx)
+	}
+	if n.Host == nil {
+		privKeyBytes, err := n.cfg.PrivateKeyBytes()
+		if err != nil {
+			return logger.Wrap("load private key", err)
+		}
+		libp2pPriv, err := libp2pcrypto.UnmarshalEd25519PrivateKey(privKeyBytes[:ed25519.PrivateKeySize])
+		if err != nil {
+			return logger.Wrap("unmarshal libp2p key", err)
+		}
+		log.Info("libp2p host starting for selected backend", "share_backend", n.cfg.ActiveNetworkBackend())
+		if err := n.startLibp2pHost(ctx, libp2pPriv); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	if n.relayEnabled() {
@@ -227,6 +280,60 @@ func (n *Node) ApplyNetworkConfig(ctx context.Context) error {
 	return nil
 }
 
+func (n *Node) StartLibp2p(ctx context.Context, backend string) error {
+	if n == nil {
+		return nil
+	}
+	backend = config.CanonicalNetworkBackend(backend)
+	if backend != "libp2p_relay" && backend != "libp2p_dht" {
+		return fmt.Errorf("unsupported libp2p backend %q", backend)
+	}
+	return n.applyNetworkConfig(ctx, backend)
+}
+
+func (n *Node) Libp2pRunning() bool {
+	if n == nil {
+		return false
+	}
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.Host != nil
+}
+
+func (n *Node) StopLibp2p(ctx context.Context) error {
+	if n == nil {
+		return nil
+	}
+	n.mu.Lock()
+	if n.relayCancel != nil {
+		n.relayCancel()
+		n.relayCancel = nil
+	}
+	if n.dhtCancel != nil {
+		n.dhtCancel()
+		n.dhtCancel = nil
+	}
+	dc := n.dhtClient
+	n.dhtClient = nil
+	n.relayAddrs = nil
+	n.relayInfos = nil
+	n.relayRefusedUntil = nil
+	host := n.Host
+	n.Host = nil
+	n.activeLibp2pBackend = ""
+	n.mu.Unlock()
+	if dc != nil {
+		_ = dc.Close()
+	}
+	if host == nil {
+		return nil
+	}
+	log.Info("libp2p host stopping", "share_backend", n.cfg.ActiveNetworkBackend())
+	err := host.Close()
+	n.fireAddrsChange()
+	return err
+}
+
 func (n *Node) startRelayLoops(ctx context.Context) {
 	if !n.relayEnabled() {
 		return
@@ -251,6 +358,11 @@ func (n *Node) startDHT(ctx context.Context) {
 		}
 		n.dhtClient = nil
 		n.mu.Unlock()
+		return
+	}
+	if n.Host == nil {
+		n.setDHTError(fmt.Errorf("libp2p host is not running"))
+		log.Warn("libp2p DHT start skipped", "err", "libp2p host is not running")
 		return
 	}
 	dhtCtx, cancel := context.WithCancel(ctx)
@@ -450,6 +562,11 @@ func (n *Node) FindIdentityAddrs(ctx context.Context, publicKeyHex string, expec
 		log.Info("libp2p DHT identity address resolve succeeded", "peer", short(expectedPeerID), "raw_addrs", len(info.Addrs), "external_addrs", len(out), "duration", time.Since(started).String())
 		return out, nil
 	}
+	if n.Host == nil {
+		err := fmt.Errorf("libp2p host is not running")
+		log.Warn("libp2p DHT identity provider connect failed", "peer", short(expectedPeerID), "duration", time.Since(started).String(), "err", err)
+		return nil, err
+	}
 	if err := n.Host.Connect(ctx, info); err != nil {
 		log.Warn("libp2p DHT identity provider connect failed", "peer", short(expectedPeerID), "duration", time.Since(started).String(), "err", err)
 		return nil, logger.Wrap("connect to identity provider", err)
@@ -494,6 +611,9 @@ func (n *Node) RelayMask() byte {
 	if !n.relayEnabled() {
 		return 0
 	}
+	if n.Host == nil {
+		return 0
+	}
 	var mask byte
 	for i, relayInfo := range n.relayInfos {
 		if i >= 8 {
@@ -526,14 +646,23 @@ func (n *Node) OnAddrsChange(fn func([]string)) {
 }
 
 func (n *Node) SetTunnelHandler(fn func(network.Stream)) {
+	if n == nil || n.Host == nil {
+		return
+	}
 	n.Host.SetStreamHandler(ProtocolTunnel, fn)
 }
 
 func (n *Node) SetPairingHandler(fn func(network.Stream)) {
+	if n == nil || n.Host == nil {
+		return
+	}
 	n.Host.SetStreamHandler(ProtocolPairing, fn)
 }
 
 func (n *Node) ConnTypeFor(peerID string) ConnType {
+	if n == nil || n.Host == nil {
+		return ConnUnknown
+	}
 	pid, err := peer.Decode(peerID)
 	if err != nil {
 		return ConnUnknown
@@ -550,6 +679,9 @@ func (n *Node) ConnTypeFor(peerID string) ConnType {
 }
 
 func (n *Node) OpenTunnel(ctx context.Context, peerID string, relayAddrs []string) (network.Stream, error) {
+	if n == nil || n.Host == nil {
+		return nil, fmt.Errorf("libp2p host is not running")
+	}
 	info, err := n.buildAddrInfo(peerID, relayAddrs)
 	if err != nil {
 		return nil, err
@@ -563,6 +695,9 @@ func (n *Node) OpenTunnel(ctx context.Context, peerID string, relayAddrs []strin
 }
 
 func (n *Node) OpenPairing(ctx context.Context, peerID string, relayAddrs []string) (network.Stream, error) {
+	if n == nil || n.Host == nil {
+		return nil, fmt.Errorf("libp2p host is not running")
+	}
 	info, err := n.buildAddrInfo(peerID, relayAddrs)
 	if err != nil {
 		return nil, err
@@ -588,6 +723,9 @@ func (n *Node) Close() error {
 	n.mu.Unlock()
 	if dc != nil {
 		_ = dc.Close()
+	}
+	if n.Host == nil {
+		return nil
 	}
 	return n.Host.Close()
 }
@@ -932,6 +1070,28 @@ func filterNonLoopbackMultiaddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multia
 	return out
 }
 
+func FilterExternallyDialableAddrs(rawAddrs []string) []string {
+	out := make([]string, 0, len(rawAddrs))
+	seen := make(map[string]struct{}, len(rawAddrs))
+	for _, raw := range rawAddrs {
+		ma, err := multiaddr.NewMultiaddr(raw)
+		if err != nil || isLoopbackMultiaddr(ma) {
+			continue
+		}
+		key := ma.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	return out
+}
+
+func (n *Node) AllowsLoopbackDial() bool {
+	return n != nil && n.allowLoopbackDial
+}
+
 func appendUniqueMultiaddrs(dst, src []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 	seen := make(map[string]struct{}, len(dst)+len(src))
 	for _, addr := range dst {
@@ -949,14 +1109,15 @@ func appendUniqueMultiaddrs(dst, src []multiaddr.Multiaddr) []multiaddr.Multiadd
 }
 
 func (n *Node) relayEnabled() bool {
-	return n.cfg != nil &&
-		n.cfg.ActiveNetworkBackend() == "libp2p_relay" &&
+	return n != nil && n.cfg != nil &&
+		n.currentLibp2pBackend() == "libp2p_relay" &&
 		n.cfg.Relay.Mode != "" &&
 		n.cfg.Relay.Mode != "disabled"
 }
 
 func (n *Node) dhtEnabled() bool {
-	return n.cfg != nil &&
+	return n != nil && n.cfg != nil &&
+		n.currentLibp2pBackend() == "libp2p_dht" &&
 		n.cfg.DHT.Mode != "" &&
 		n.cfg.DHT.Mode != "disabled"
 }
@@ -971,18 +1132,45 @@ func (n *Node) libp2pActive() bool {
 	return false
 }
 
+func (n *Node) configuredLibp2pBackend() string {
+	if n == nil || n.cfg == nil {
+		return ""
+	}
+	switch n.cfg.ActiveNetworkBackend() {
+	case "libp2p_relay", "libp2p_dht":
+		return n.cfg.ActiveNetworkBackend()
+	default:
+		return ""
+	}
+}
+
+func (n *Node) currentLibp2pBackend() string {
+	if n == nil {
+		return ""
+	}
+	return n.activeLibp2pBackend
+}
+
 func (n *Node) buildAddrInfo(peerID string, relayAddrs []string) (peer.AddrInfo, error) {
 	pid, err := peer.Decode(peerID)
 	if err != nil {
 		return peer.AddrInfo{}, logger.Wrap("invalid peer id", err)
 	}
 	var addrs []multiaddr.Multiaddr
+	skippedLoopback := 0
 	for _, raw := range relayAddrs {
 		ma, err := multiaddr.NewMultiaddr(raw)
 		if err != nil {
 			continue
 		}
+		if !n.allowLoopbackDial && isLoopbackMultiaddr(ma) {
+			skippedLoopback++
+			continue
+		}
 		addrs = append(addrs, ma)
+	}
+	if len(addrs) == 0 && skippedLoopback > 0 {
+		return peer.AddrInfo{}, fmt.Errorf("only loopback addresses available for peer %s; create a fresh invite with a reachable backend or configure a public relay", short(peerID))
 	}
 	return peer.AddrInfo{ID: pid, Addrs: addrs}, nil
 }
