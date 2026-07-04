@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -12,7 +13,7 @@ import (
 	"github.com/rdpanywhere/rdpanywhere/internal/config"
 	"github.com/rdpanywhere/rdpanywhere/internal/identity"
 	"github.com/rdpanywhere/rdpanywhere/internal/ipc"
-	"github.com/rdpanywhere/rdpanywhere/internal/irohnet"
+	"github.com/rdpanywhere/rdpanywhere/internal/irohsidecar"
 	"github.com/rdpanywhere/rdpanywhere/internal/logger"
 	"github.com/rdpanywhere/rdpanywhere/internal/netbackend"
 	"github.com/rdpanywhere/rdpanywhere/internal/node"
@@ -36,18 +37,30 @@ var svcConfig = &service.Config{
 // function; all component lifetime is managed inside RunStack.
 type App struct {
 	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 func (a *App) Start(_ service.Service) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
-	go RunStack(ctx)
+	a.done = make(chan struct{})
+	go func() {
+		defer close(a.done)
+		RunStack(ctx)
+	}()
 	return nil
 }
 
 func (a *App) Stop(_ service.Service) error {
 	if a.cancel != nil {
 		a.cancel()
+	}
+	if a.done != nil {
+		select {
+		case <-a.done:
+		case <-time.After(10 * time.Second):
+			slogService.Warn("service stack did not stop before timeout")
+		}
 	}
 	return nil
 }
@@ -164,29 +177,271 @@ func RunStack(ctx context.Context) {
 	})
 
 	tunnelMgr := tunnel.New(n, cfg, pres, pairingMgr.Sessions())
+	if n.Libp2pRunning() {
+		pairingMgr.SetLibp2p(true)
+		tunnelMgr.SetLibp2p(true)
+		slogService.Info("libp2p backend registered", "share_backend", cfg.ActiveNetworkBackend())
+	}
 	if quicBackend != nil {
 		tunnelMgr.SetBitTorrentQUIC(quicBackend)
 		quicBackend.SetHandlers(pairingMgr.HandleQUICIncoming, tunnelMgr.HandleQUICIncoming)
 		slogService.Info("direct QUIC backend ready", "addrs", quicBackend.Addrs())
 	}
 
-	var irohBackend *irohnet.Backend
-	if shouldRunIrohBackend(cfg) {
-		irohBackend, err = irohnet.New(ctx, cfg)
-		if err != nil {
-			log.Printf("iroh init failed (non-fatal): %v", err)
+	var irohSidecar *irohsidecar.Backend
+	backendRefs := make(map[string]map[string]struct{})
+	backendRefCountLocked := func(backend string) int {
+		return len(backendRefs[config.CanonicalNetworkBackend(backend)])
+	}
+	registerIrohSidecarLocked := func(next *irohsidecar.Backend, reason string) {
+		irohSidecar = next
+		pairingMgr.SetIroh(irohSidecar)
+		tunnelMgr.SetIroh(irohSidecar)
+		irohSidecar.SetHandlers(pairingMgr.HandleIrohIncoming, tunnelMgr.HandleIrohIncoming)
+		slogService.Info("iroh sidecar backend ready", "reason", reason)
+	}
+	stopIrohSidecarLocked := func(reason string) {
+		if irohSidecar == nil {
+			return
 		}
-		if irohBackend != nil {
-			defer irohBackend.Close(context.Background())
-			pairingMgr.SetIroh(irohBackend)
-			tunnelMgr.SetIroh(irohBackend)
-			irohBackend.SetHandlers(pairingMgr.HandleIrohIncoming, tunnelMgr.HandleIrohIncoming)
-			slogService.Info("iroh backend ready", "endpoint_id", irohnet.LogValue(irohBackend))
+		slogService.Info("iroh sidecar backend stopping", "reason", reason)
+		current := irohSidecar
+		irohSidecar = nil
+		pairingMgr.SetIroh(nil)
+		tunnelMgr.SetIroh(nil)
+		_ = current.Close(context.Background())
+	}
+	startIrohSidecarLocked := func(startCtx context.Context, reason string, allowEnable bool) error {
+		if irohSidecar != nil {
+			if irohSidecar.Running() {
+				slogService.Info("iroh sidecar backend already running", "reason", reason)
+				return nil
+			}
+			slogService.Warn("iroh sidecar backend is stopped; unregistering before restart", "reason", reason)
+			stopIrohSidecarLocked(reason + " stopped backend cleanup")
+		}
+		oldMode := cfg.Iroh.Mode
+		if allowEnable && (cfg.Iroh.Mode == "" || cfg.Iroh.Mode == "disabled") {
+			cfg.Iroh.Mode = "public"
+		}
+		defer func() {
+			if allowEnable && (oldMode == "" || oldMode == "disabled") {
+				cfg.Iroh.Mode = oldMode
+			}
+		}()
+		if cfg.Iroh.Mode == "" || cfg.Iroh.Mode == "disabled" {
+			return fmt.Errorf("iroh backend is disabled")
+		}
+		slogService.Info("iroh sidecar backend starting", "reason", reason, "mode", cfg.Iroh.Mode)
+		nextSidecar, err := irohsidecar.New(startCtx, cfg)
+		if err != nil {
+			var notFound *irohsidecar.NotFoundError
+			if errors.As(err, &notFound) {
+				lastNetworkApplyError = err.Error()
+				slogService.Warn("iroh sidecar backend start failed: binary not found", "reason", reason, "searched", notFound.Searched)
+			} else {
+				lastNetworkApplyError = err.Error()
+				slogService.Warn("iroh sidecar backend start failed", "reason", reason, "err", err)
+			}
+			return err
+		}
+		if nextSidecar == nil {
+			lastNetworkApplyError = "iroh sidecar binary not found"
+			return fmt.Errorf("iroh sidecar binary not found")
+		}
+		registerIrohSidecarLocked(nextSidecar, reason)
+		lastNetworkApplyError = ""
+		return nil
+	}
+	setBackendRefLocked := func(refCtx context.Context, backend string, key string, active bool, reason string) error {
+		backend = config.CanonicalNetworkBackend(backend)
+		if backend == "" || backend == "disabled" || key == "" {
+			return nil
+		}
+		refs := backendRefs[backend]
+		if refs == nil {
+			refs = make(map[string]struct{})
+			backendRefs[backend] = refs
+		}
+		_, had := refs[key]
+		if active {
+			refs[key] = struct{}{}
+		} else {
+			delete(refs, key)
+		}
+		count := len(refs)
+		if count == 0 {
+			delete(backendRefs, backend)
+		}
+		if active && !had {
+			slogService.Info("backend reference acquired", "backend", backend, "key", key, "count", count, "reason", reason)
+		} else if !active && had {
+			slogService.Info("backend reference released", "backend", backend, "key", key, "count", count, "reason", reason)
+		}
+		if backend != netbackend.BackendIroh {
+			return nil
+		}
+		if count > 0 {
+			return startIrohSidecarLocked(refCtx, "backend reference "+reason, true)
+		}
+		stopIrohSidecarLocked("backend references released: " + reason)
+		return nil
+	}
+	backendRunningLocked := func(backend string) bool {
+		switch backend {
+		case netbackend.BackendIroh:
+			return irohSidecar != nil && irohSidecar.Running()
+		case netbackend.BackendBitTorrentDHT:
+			return btDHT != nil && quicBackend != nil
+		case netbackend.BackendLibp2pDHT:
+			return n.DHT() != nil
+		case netbackend.BackendLibp2pRelay:
+			return n.Libp2pRunning()
+		default:
+			return false
 		}
 	}
+	ensureNetworkBackendLocked := func(ensureCtx context.Context, backend string, reason string) error {
+		slogService.Info("ensuring network backend",
+			"backend", backend,
+			"share_backend", cfg.ActiveNetworkBackend(),
+			"reason", reason,
+		)
+		switch backend {
+		case netbackend.BackendIroh:
+			return startIrohSidecarLocked(ensureCtx, reason, reason == "connect")
+
+		case netbackend.BackendBitTorrentDHT:
+			if cfg.BTDHT.Mode == "" || cfg.BTDHT.Mode == "disabled" {
+				cfg.BTDHT.Mode = "public"
+			}
+			privKey, err := cfg.PrivateKeyBytes()
+			if err != nil {
+				lastNetworkApplyError = err.Error()
+				return err
+			}
+			if quicBackend == nil {
+				slogService.Info("direct QUIC backend starting", "reason", reason)
+				nextQUIC, err := quicnet.New(ctx, cfg, privKey)
+				if err != nil {
+					lastNetworkApplyError = err.Error()
+					return err
+				}
+				if nextQUIC != nil {
+					quicBackend = nextQUIC
+					pairingMgr.SetBitTorrentQUIC(quicBackend)
+					tunnelMgr.SetBitTorrentQUIC(quicBackend)
+					quicBackend.SetHandlers(pairingMgr.HandleQUICIncoming, tunnelMgr.HandleQUICIncoming)
+				}
+			} else {
+				slogService.Info("direct QUIC backend already running", "reason", reason, "addrs", quicBackend.Addrs())
+			}
+			if btDHT == nil {
+				slogService.Info("BitTorrent DHT backend starting", "reason", reason, "mode", cfg.BTDHT.Mode)
+				nextBT, err := btdht.New(ctx, cfg.BTDHT, privKey, n.NodeID(), func() string {
+					return cfg.Node.Label
+				}, n.RelayAddrs, func() []string {
+					if quicBackend == nil {
+						return nil
+					}
+					return quicBackend.Addrs()
+				})
+				if err != nil {
+					lastNetworkApplyError = err.Error()
+					return err
+				}
+				btDHT = nextBT
+				pairingMgr.SetDHTDiscoverer(btDHT)
+				if btDHT != nil {
+					btDHT.PublishNow(ensureCtx)
+				}
+			} else {
+				slogService.Info("BitTorrent DHT backend already running", "reason", reason)
+			}
+			if btDHT != nil {
+				if err := btDHT.WaitReady(ensureCtx); err != nil {
+					lastNetworkApplyError = err.Error()
+					return err
+				}
+			}
+			lastNetworkApplyError = ""
+			return nil
+
+		case netbackend.BackendLibp2pDHT:
+			if cfg.DHT.Mode == "" || cfg.DHT.Mode == "disabled" {
+				cfg.DHT.Mode = "public"
+			}
+			if n.DHT() == nil {
+				if err := n.StartLibp2p(ensureCtx, netbackend.BackendLibp2pDHT); err != nil {
+					lastNetworkApplyError = err.Error()
+					return err
+				}
+				pairingMgr.SetLibp2p(n.Libp2pRunning())
+				tunnelMgr.SetLibp2p(n.Libp2pRunning())
+			}
+			if err := n.WaitDHTReady(ensureCtx); err != nil {
+				lastNetworkApplyError = err.Error()
+				return err
+			}
+			lastNetworkApplyError = ""
+			return nil
+
+		case netbackend.BackendLibp2pRelay:
+			if cfg.Relay.Mode == "" || cfg.Relay.Mode == "disabled" {
+				cfg.Relay.Mode = "public"
+			}
+			if err := n.StartLibp2p(ensureCtx, netbackend.BackendLibp2pRelay); err != nil {
+				lastNetworkApplyError = err.Error()
+				return err
+			}
+			pairingMgr.SetLibp2p(n.Libp2pRunning())
+			tunnelMgr.SetLibp2p(n.Libp2pRunning())
+			lastNetworkApplyError = ""
+			return nil
+		default:
+			return fmt.Errorf("unsupported backend %q", backend)
+		}
+	}
+	defer func() {
+		networkMu.Lock()
+		defer networkMu.Unlock()
+		stopIrohSidecarLocked("service shutdown")
+	}()
+	if cfg.ActiveNetworkBackend() == netbackend.BackendIroh {
+		if err := setBackendRefLocked(ctx, netbackend.BackendIroh, "selected", true, "startup selected backend"); err != nil {
+			log.Printf("iroh sidecar init failed (non-fatal): %v", err)
+		}
+	}
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			networkMu.Lock()
+			activeBackend := cfg.ActiveNetworkBackend()
+			shouldRetry := activeBackend != "" &&
+				activeBackend != "disabled" &&
+				!backendRunningLocked(activeBackend)
+			if !shouldRetry {
+				networkMu.Unlock()
+				continue
+			}
+			retryCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			err := ensureNetworkBackendLocked(retryCtx, activeBackend, "background retry")
+			cancel()
+			if err != nil {
+				slogService.Warn("network backend background retry failed", "backend", activeBackend, "err", err)
+			}
+			networkMu.Unlock()
+		}
+	}()
 
 	webUI := webui.New(cfg, n, pairingMgr, pres, tunnelMgr, id)
-	webUI.SetNetworkStatusProvider(func() map[string]any {
+	networkStatus := func() map[string]any {
 		networkMu.Lock()
 		defer networkMu.Unlock()
 
@@ -205,15 +460,39 @@ func RunStack(ctx context.Context) {
 				"running": false,
 			}
 		}
-		if irohBackend != nil {
-			status["iroh"] = irohBackend.Status()
+		if irohSidecar != nil {
+			irohStatus := irohSidecar.Status()
+			irohStatus["references"] = backendRefCountLocked(netbackend.BackendIroh)
+			status["iroh"] = irohStatus
 		} else {
 			status["iroh"] = map[string]any{
-				"enabled": cfg.Iroh.Mode != "" && cfg.Iroh.Mode != "disabled",
-				"running": false,
+				"enabled":    cfg.Iroh.Mode != "" && cfg.Iroh.Mode != "disabled",
+				"running":    false,
+				"sidecar":    true,
+				"references": backendRefCountLocked(netbackend.BackendIroh),
 			}
 		}
 		return status
+	}
+	webUI.SetNetworkStatusProvider(networkStatus)
+	webUI.SetNetworkRefreshProvider(func(refreshCtx context.Context) (map[string]any, error) {
+		networkMu.Lock()
+		activeBackend := cfg.ActiveNetworkBackend()
+		currentSidecar := irohSidecar
+		networkMu.Unlock()
+
+		var refreshErr error
+		switch activeBackend {
+		case "iroh":
+			if currentSidecar != nil {
+				_, refreshErr = currentSidecar.Refresh(refreshCtx)
+			} else {
+				refreshErr = fmt.Errorf("iroh sidecar backend is not running")
+			}
+		default:
+			slogService.Info("manual network refresh has no active probe", "share_backend", activeBackend)
+		}
+		return networkStatus(), refreshErr
 	})
 	webUI.SetApplyNetworkConfig(func(applyCtx context.Context) error {
 		networkMu.Lock()
@@ -232,21 +511,27 @@ func RunStack(ctx context.Context) {
 			lastNetworkApplyError = err.Error()
 			return err
 		}
+		pairingMgr.SetLibp2p(n.Libp2pRunning())
+		tunnelMgr.SetLibp2p(n.Libp2pRunning())
 		lastNetworkApplyError = ""
 		if pres != nil {
 			pres.AnnounceNow(applyCtx)
 		}
 
 		if btDHT != nil {
+			slogService.Info("BitTorrent DHT backend stopping", "reason", "network settings apply")
 			btDHT.Close()
 			btDHT = nil
 			pairingMgr.SetDHTDiscoverer(nil)
+			slogService.Info("BitTorrent DHT backend stopped", "reason", "network settings apply")
 		}
 		if quicBackend != nil {
+			slogService.Info("direct QUIC backend stopping", "reason", "network settings apply")
 			_ = quicBackend.Close()
 			quicBackend = nil
 			pairingMgr.SetBitTorrentQUIC(nil)
 			tunnelMgr.SetBitTorrentQUIC(nil)
+			slogService.Info("direct QUIC backend stopped", "reason", "network settings apply")
 		}
 		if shouldRunBitTorrentDHTBackend(cfg) {
 			privKey, err := cfg.PrivateKeyBytes()
@@ -254,6 +539,7 @@ func RunStack(ctx context.Context) {
 				lastNetworkApplyError = err.Error()
 				slogService.Warn("BitTorrent DHT disabled after config apply: load key failed", "err", err)
 			} else {
+				slogService.Info("direct QUIC backend starting", "reason", "network settings apply")
 				nextQUIC, err := quicnet.New(ctx, cfg, privKey)
 				if err != nil {
 					lastNetworkApplyError = err.Error()
@@ -265,6 +551,7 @@ func RunStack(ctx context.Context) {
 					quicBackend.SetHandlers(pairingMgr.HandleQUICIncoming, tunnelMgr.HandleQUICIncoming)
 					slogService.Info("direct QUIC backend applied", "addrs", quicBackend.Addrs())
 				}
+				slogService.Info("BitTorrent DHT backend starting", "reason", "network settings apply", "mode", cfg.BTDHT.Mode)
 				nextBT, err := btdht.New(ctx, cfg.BTDHT, privKey, n.NodeID(), func() string {
 					return cfg.Node.Label
 				}, n.RelayAddrs, func() []string {
@@ -284,24 +571,13 @@ func RunStack(ctx context.Context) {
 			}
 		}
 
-		if irohBackend != nil {
-			_ = irohBackend.Close(context.Background())
-			irohBackend = nil
-			pairingMgr.SetIroh(nil)
-			tunnelMgr.SetIroh(nil)
-		}
-		if shouldRunIrohBackend(cfg) {
-			nextIroh, err := irohnet.New(ctx, cfg)
-			if err != nil {
+		if cfg.ActiveNetworkBackend() == netbackend.BackendIroh {
+			if err := setBackendRefLocked(applyCtx, netbackend.BackendIroh, "selected", true, "network settings apply"); err != nil {
 				lastNetworkApplyError = err.Error()
-				slogService.Warn("iroh apply failed", "err", err)
-			} else if nextIroh != nil {
-				irohBackend = nextIroh
-				pairingMgr.SetIroh(irohBackend)
-				tunnelMgr.SetIroh(irohBackend)
-				irohBackend.SetHandlers(pairingMgr.HandleIrohIncoming, tunnelMgr.HandleIrohIncoming)
-				slogService.Info("iroh backend applied", "endpoint_id", irohnet.LogValue(irohBackend))
+				slogService.Warn("iroh sidecar apply failed", "err", err)
 			}
+		} else {
+			_ = setBackendRefLocked(applyCtx, netbackend.BackendIroh, "selected", false, "network settings apply")
 		}
 
 		slogService.Info("network settings applied", "share_backend", cfg.ActiveNetworkBackend())
@@ -310,120 +586,20 @@ func RunStack(ctx context.Context) {
 	webUI.SetEnsureNetworkBackend(func(ensureCtx context.Context, backend string) error {
 		networkMu.Lock()
 		defer networkMu.Unlock()
-
-		slogService.Info("ensuring network backend for connect",
-			"backend", backend,
-			"share_backend", cfg.ActiveNetworkBackend(),
-		)
-		switch backend {
-		case "iroh":
-			if irohBackend != nil {
-				return nil
-			}
-			oldMode := cfg.Iroh.Mode
-			if cfg.Iroh.Mode == "" || cfg.Iroh.Mode == "disabled" {
-				cfg.Iroh.Mode = "public"
-			}
-			nextIroh, err := irohnet.New(ctx, cfg)
-			if oldMode == "" || oldMode == "disabled" {
-				cfg.Iroh.Mode = oldMode
-			}
-			if err != nil {
-				lastNetworkApplyError = err.Error()
-				return err
-			}
-			if nextIroh == nil {
-				return fmt.Errorf("iroh backend did not start")
-			}
-			irohBackend = nextIroh
-			pairingMgr.SetIroh(irohBackend)
-			tunnelMgr.SetIroh(irohBackend)
-			irohBackend.SetHandlers(pairingMgr.HandleIrohIncoming, tunnelMgr.HandleIrohIncoming)
-			if err := waitIrohReady(ensureCtx, irohBackend); err != nil {
-				lastNetworkApplyError = err.Error()
-				return err
-			}
-			slogService.Info("iroh backend started for connect", "endpoint_id", irohnet.LogValue(irohBackend))
-			return nil
-
-		case "bittorrent_dht":
-			if cfg.BTDHT.Mode == "" || cfg.BTDHT.Mode == "disabled" {
-				cfg.BTDHT.Mode = "public"
-			}
-			privKey, err := cfg.PrivateKeyBytes()
-			if err != nil {
-				lastNetworkApplyError = err.Error()
-				return err
-			}
-			if quicBackend == nil {
-				nextQUIC, err := quicnet.New(ctx, cfg, privKey)
-				if err != nil {
-					lastNetworkApplyError = err.Error()
-					return err
-				}
-				if nextQUIC != nil {
-					quicBackend = nextQUIC
-					pairingMgr.SetBitTorrentQUIC(quicBackend)
-					tunnelMgr.SetBitTorrentQUIC(quicBackend)
-					quicBackend.SetHandlers(pairingMgr.HandleQUICIncoming, tunnelMgr.HandleQUICIncoming)
-				}
-			}
-			if btDHT == nil {
-				nextBT, err := btdht.New(ctx, cfg.BTDHT, privKey, n.NodeID(), func() string {
-					return cfg.Node.Label
-				}, n.RelayAddrs, func() []string {
-					if quicBackend == nil {
-						return nil
-					}
-					return quicBackend.Addrs()
-				})
-				if err != nil {
-					lastNetworkApplyError = err.Error()
-					return err
-				}
-				btDHT = nextBT
-				pairingMgr.SetDHTDiscoverer(btDHT)
-				if btDHT != nil {
-					btDHT.PublishNow(ensureCtx)
-				}
-			}
-			if btDHT != nil {
-				if err := btDHT.WaitReady(ensureCtx); err != nil {
-					lastNetworkApplyError = err.Error()
-					return err
-				}
-			}
-			return nil
-
-		case "libp2p_dht":
-			if cfg.DHT.Mode == "" || cfg.DHT.Mode == "disabled" {
-				cfg.DHT.Mode = "public"
-			}
-			if n.DHT() == nil {
-				if err := n.ApplyNetworkConfig(ensureCtx); err != nil {
-					lastNetworkApplyError = err.Error()
-					return err
-				}
-			}
-			if err := n.WaitDHTReady(ensureCtx); err != nil {
-				lastNetworkApplyError = err.Error()
-				return err
-			}
-			return nil
-
-		case "libp2p_relay":
-			if cfg.Relay.Mode == "" || cfg.Relay.Mode == "disabled" {
-				cfg.Relay.Mode = "public"
-				if err := n.ApplyNetworkConfig(ensureCtx); err != nil {
-					lastNetworkApplyError = err.Error()
-					return err
-				}
-			}
-			return nil
-		default:
-			return fmt.Errorf("unsupported backend %q", backend)
-		}
+		return ensureNetworkBackendLocked(ensureCtx, backend, "connect")
 	})
+	webUI.SetBackendReferenceHooks(
+		func(refCtx context.Context, backend string, key string, reason string) error {
+			networkMu.Lock()
+			defer networkMu.Unlock()
+			return setBackendRefLocked(refCtx, backend, key, true, reason)
+		},
+		func(backend string, key string, reason string) {
+			networkMu.Lock()
+			defer networkMu.Unlock()
+			_ = setBackendRefLocked(context.Background(), backend, key, false, reason)
+		},
+	)
 	go webUI.Start(ctx)
 	slogService.Info("web ui starting", "listen", "http://127.0.0.1:18080")
 
@@ -477,7 +653,7 @@ func RunStack(ctx context.Context) {
 	slogService.Info("service stack stopped")
 }
 
-func shouldRunIrohBackend(cfg *config.Config) bool {
+func shouldRunIrohSidecarBackend(cfg *config.Config) bool {
 	return cfg != nil && cfg.ActiveNetworkBackend() == "iroh" && cfg.Iroh.Mode != "" && cfg.Iroh.Mode != "disabled"
 }
 
@@ -492,29 +668,13 @@ func shouldRunLibp2pBackground(cfg *config.Config) bool {
 	if cfg == nil {
 		return false
 	}
-	return (cfg.Relay.Mode != "" && cfg.Relay.Mode != "disabled") ||
-		(cfg.DHT.Mode != "" && cfg.DHT.Mode != "disabled")
-}
-
-func waitIrohReady(ctx context.Context, backend *irohnet.Backend) error {
-	if backend == nil {
-		return fmt.Errorf("iroh backend is not running")
-	}
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		status := backend.Status()
-		if ready, _ := status["ready"].(bool); ready {
-			return nil
-		}
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			if errText, _ := status["last_error"].(string); errText != "" {
-				return fmt.Errorf("iroh backend not ready: %s", errText)
-			}
-			return fmt.Errorf("iroh backend not ready")
-		}
+	switch cfg.ActiveNetworkBackend() {
+	case netbackend.BackendLibp2pRelay:
+		return cfg.Relay.Mode != "" && cfg.Relay.Mode != "disabled"
+	case netbackend.BackendLibp2pDHT:
+		return cfg.DHT.Mode != "" && cfg.DHT.Mode != "disabled"
+	default:
+		return false
 	}
 }
 

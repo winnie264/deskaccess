@@ -49,9 +49,12 @@ type Server struct {
 	launchMu     sync.Mutex
 	launchTokens map[string]struct{}
 
-	applyNetworkConfig   func(context.Context) error
-	ensureNetworkBackend func(context.Context, string) error
-	networkStatus        func() map[string]any
+	applyNetworkConfig    func(context.Context) error
+	ensureNetworkBackend  func(context.Context, string) error
+	retainNetworkBackend  func(context.Context, string, string, string) error
+	releaseNetworkBackend func(string, string, string)
+	networkStatus         func() map[string]any
+	refreshNetworkStatus  func(context.Context) (map[string]any, error)
 
 	connectMu      sync.Mutex
 	activeConnects map[string]*connectAttempt
@@ -62,20 +65,24 @@ type Server struct {
 const (
 	connectOperationTimeout = 75 * time.Second
 	connectStaleAfter       = 90 * time.Second
+	dashboardSessionTTL     = 30 * 24 * time.Hour
 )
 
 type connectStatus struct {
-	Key       string    `json:"key"`
-	Stage     string    `json:"stage"`
-	Message   string    `json:"message"`
-	Protocol  string    `json:"protocol,omitempty"`
-	Peer      string    `json:"peer,omitempty"`
-	LocalAddr string    `json:"local_addr,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	StartedAt time.Time `json:"started_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Done      bool      `json:"done"`
-	Active    bool      `json:"active"`
+	Key              string    `json:"key"`
+	Stage            string    `json:"stage"`
+	Message          string    `json:"message"`
+	Protocol         string    `json:"protocol,omitempty"`
+	Peer             string    `json:"peer,omitempty"`
+	LocalAddr        string    `json:"local_addr,omitempty"`
+	Error            string    `json:"error,omitempty"`
+	StartedAt        time.Time `json:"started_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+	Done             bool      `json:"done"`
+	Active           bool      `json:"active"`
+	AppConnected     bool      `json:"app_connected"`
+	ActiveAppStreams int       `json:"active_app_streams"`
+	ActiveAppClients int       `json:"active_app_clients"`
 }
 
 type connectAttempt struct {
@@ -84,12 +91,17 @@ type connectAttempt struct {
 }
 
 type connectSession struct {
-	Key       string
-	Peer      string
-	Protocol  string
-	LocalAddr string
-	StartedAt time.Time
-	Proxy     *tunnel.LocalProxy
+	Key              string
+	Keys             []string
+	Peer             string
+	Protocol         string
+	Backend          string
+	LocalAddr        string
+	StartedAt        time.Time
+	Proxy            *tunnel.LocalProxy
+	AppConnected     bool
+	ActiveAppStreams int
+	ActiveAppClients int
 }
 
 func New(
@@ -123,8 +135,17 @@ func (s *Server) SetEnsureNetworkBackend(fn func(context.Context, string) error)
 	s.ensureNetworkBackend = fn
 }
 
+func (s *Server) SetBackendReferenceHooks(retain func(context.Context, string, string, string) error, release func(string, string, string)) {
+	s.retainNetworkBackend = retain
+	s.releaseNetworkBackend = release
+}
+
 func (s *Server) SetNetworkStatusProvider(fn func() map[string]any) {
 	s.networkStatus = fn
+}
+
+func (s *Server) SetNetworkRefreshProvider(fn func(context.Context) (map[string]any, error)) {
+	s.refreshNetworkStatus = fn
 }
 
 // BaseURL mints a fresh single-use launch token and returns the authenticated
@@ -143,15 +164,6 @@ func (s *Server) BaseURL() string {
 // serveHTTP is the top-level handler. All requests require either the
 // long-lived session cookie or a valid (unburned) single-use launch token.
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	if !allowDashboardSource(r) {
-		webLog.Warn("dashboard request rejected by source process check",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"remote_addr", r.RemoteAddr,
-		)
-		http.Error(w, "Forbidden", http.StatusForbidden)
-		return
-	}
 	// Long-lived session cookie → pass through.
 	if c, err := r.Cookie("DeskAccess_session"); err == nil && c.Value == s.sessionToken {
 		s.mux.ServeHTTP(w, r)
@@ -159,16 +171,28 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Single-use launch token in URL → burn it, set session cookie, redirect.
 	if tok := r.URL.Query().Get("token"); tok != "" {
+		if !allowDashboardSource(r) {
+			webLog.Warn("dashboard launch token rejected by source process check",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"remote_addr", r.RemoteAddr,
+			)
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
 		s.launchMu.Lock()
 		_, valid := s.launchTokens[tok]
 		delete(s.launchTokens, tok) // burn regardless — no replays
 		s.launchMu.Unlock()
 
 		if valid {
+			expires := time.Now().Add(dashboardSessionTTL)
 			http.SetCookie(w, &http.Cookie{
 				Name:     "DeskAccess_session",
 				Value:    s.sessionToken,
 				Path:     "/",
+				Expires:  expires,
+				MaxAge:   int(dashboardSessionTTL.Seconds()),
 				HttpOnly: true,
 				SameSite: http.SameSiteStrictMode,
 			})
@@ -219,6 +243,7 @@ func (s *Server) routes() {
 
 	// API
 	s.mux.HandleFunc("/api/status", s.handleStatus)
+	s.mux.HandleFunc("/api/status/refresh", s.handleStatusRefresh)
 	s.mux.HandleFunc("/api/remotes", s.handleRemotes)
 	s.mux.HandleFunc("/api/url/onetime", s.handleURLOneTime)
 	s.mux.HandleFunc("/api/url/pairing", s.handleURLPairing)
@@ -527,6 +552,33 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	respond(w, resp)
 }
 
+func (s *Server) handleStatusRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.refreshNetworkStatus == nil {
+		http.Error(w, "refresh unavailable", http.StatusNotImplemented)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	status, err := s.refreshNetworkStatus(ctx)
+	if err != nil {
+		webLog.Warn("network status refresh failed", "err", err)
+		respond(w, map[string]any{
+			"ok":             false,
+			"error":          err.Error(),
+			"network_status": status,
+		})
+		return
+	}
+	respond(w, map[string]any{
+		"ok":             true,
+		"network_status": status,
+	})
+}
+
 // GET /api/remotes — list paired remotes. Online only means an active tunnel is open.
 func (s *Server) handleRemotes(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
@@ -538,6 +590,7 @@ func (s *Server) handleRemotes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for _, remote := range s.cfg.Remotes {
+		remoteKey := config.RemoteServiceKey(remote)
 		st, ok := presenceByID[remote.NodeID]
 		if !ok {
 			st = presence.Status{
@@ -545,22 +598,37 @@ func (s *Server) handleRemotes(w http.ResponseWriter, r *http.Request) {
 				Label:  remote.Label,
 			}
 		}
-		session, connected := s.connectedSession("peer:" + remote.NodeID)
+		connectKey := "peer:" + remoteKey
+		session, connected := s.connectedSession(connectKey)
 		localAddr := ""
+		connectionAddr := ""
 		connectedProtocol := ""
+		appConnected := false
+		activeAppStreams := 0
+		activeAppClients := 0
 		connType := node.ConnUnknown
 		if session != nil {
+			session = session.withAppActivity()
 			localAddr = session.LocalAddr
 			connectedProtocol = session.Protocol
-			if s.node != nil {
+			appConnected = session.AppConnected
+			activeAppStreams = session.ActiveAppStreams
+			activeAppClients = session.ActiveAppClients
+			if session.Proxy != nil {
+				connType = node.ConnType(session.Proxy.ConnectionPath())
+				connectionAddr = session.Proxy.ConnectionAddr()
+			}
+			if connType == node.ConnUnknown && s.node != nil {
 				connType = s.node.ConnTypeFor(st.NodeID)
 			}
 		}
-		connectKey := "peer:" + remote.NodeID
 		connecting, connectStage, connectMessage := s.connectingState(connectKey)
 		statuses = append(statuses, map[string]any{
+			"remote_key":           remoteKey,
 			"node_id":              st.NodeID,
 			"label":                st.Label,
+			"protocol":             remote.Protocol,
+			"target_port":          remote.TargetPort,
 			"online":               connected,
 			"last_seen":            st.LastSeen,
 			"conn_type":            connType, // "direct" | "relayed" | "unknown"
@@ -569,7 +637,11 @@ func (s *Server) handleRemotes(w http.ResponseWriter, r *http.Request) {
 			"discovery_checked_at": time.Time{},
 			"connected":            connected,
 			"local_addr":           localAddr,
+			"connection_addr":      connectionAddr,
 			"connected_protocol":   connectedProtocol,
+			"app_connected":        appConnected,
+			"active_app_streams":   activeAppStreams,
+			"active_app_clients":   activeAppClients,
 			"connecting":           connecting,
 			"connect_stage":        connectStage,
 			"connect_message":      connectMessage,
@@ -583,7 +655,7 @@ func (s *Server) handleRemotes(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	webLog.Info("paired remotes returned",
+	webLog.Debug("paired remotes returned",
 		"method", r.Method,
 		"remotes", len(statuses),
 		"connected", connectedCount,
@@ -634,9 +706,26 @@ func (s *Server) handleGenerateURL(w http.ResponseWriter, r *http.Request, mode 
 
 	rawURL, view, err := s.pairing.GenerateURL(mode, ttl, strings.TrimSpace(req.Label), req.Protocol, targetPort)
 	if err != nil {
+		webLog.Warn("invite generation failed",
+			"mode", mode,
+			"protocol", req.Protocol,
+			"target_port", targetPort,
+			"share_backend", s.cfg.ActiveNetworkBackend(),
+			"remote_addr", r.RemoteAddr,
+			"err", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	webLog.Info("invite generated",
+		"mode", mode,
+		"invite_id", view.ID,
+		"status", view.Status,
+		"protocol", req.Protocol,
+		"target_port", targetPort,
+		"share_backend", s.cfg.ActiveNetworkBackend(),
+		"label", strings.TrimSpace(req.Label),
+		"expires_at", view.ExpiresAt,
+		"remote_addr", r.RemoteAddr)
 	respond(w, map[string]any{
 		"url":        rawURL,
 		"expires_at": view.ExpiresAt,
@@ -691,29 +780,36 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		URL    string `json:"url"`     // deskaccess:// invite link
-		NodeID string `json:"node_id"` // paired remote (no code needed)
+		URL       string `json:"url"`        // deskaccess:// invite link
+		NodeID    string `json:"node_id"`    // paired remote (no code needed)
+		RemoteKey string `json:"remote_key"` // paired remote service key
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	connectKey := connectRequestKey(req.NodeID, req.URL)
+	remote, hasRemote := s.remoteByRequest(req.RemoteKey, req.NodeID)
+	connectKey := connectRequestKey(req.RemoteKey, req.NodeID, req.URL)
 	if connectKey == "" {
 		http.Error(w, "url or node_id required", http.StatusBadRequest)
 		return
 	}
 	if session, ok := s.connectedSession(connectKey); ok {
+		session = session.withAppActivity()
 		webLog.Info("connect returned existing active session",
 			"connect_key", connectKey,
 			"peer", shortID(session.Peer),
 			"local_addr", session.LocalAddr)
 		respond(w, map[string]any{
-			"local_addr": session.LocalAddr,
-			"launched":   false,
-			"client":     "",
-			"protocol":   session.Protocol,
-			"active":     true,
+			"peer_id":            session.Peer,
+			"local_addr":         session.LocalAddr,
+			"launched":           false,
+			"client":             "",
+			"protocol":           session.Protocol,
+			"active":             true,
+			"app_connected":      session.AppConnected,
+			"active_app_streams": session.ActiveAppStreams,
+			"active_app_clients": session.ActiveAppClients,
 		})
 		return
 	}
@@ -750,6 +846,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	var localAddr string
 	var proxy *tunnel.LocalProxy
 	var connErr error
+	var resultPeerID string
 	proto := s.cfg.RDP.Protocol
 	if proto == "" {
 		proto = "rdp"
@@ -761,6 +858,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		inviteBackend := pairing.InviteNetworkBackend(req.URL)
 		if inviteBackend != "" && s.ensureNetworkBackend != nil {
 			s.setConnectStatus(connectKey, "backend", "Starting "+inviteBackend+" backend", "", "", "", nil, false)
+			s.retainConnectAttemptBackend(connectCtx, inviteBackend, connectKey)
+			defer s.releaseConnectAttemptBackend(inviteBackend, connectKey)
 			if err := s.ensureNetworkBackend(connectCtx, inviteBackend); err != nil {
 				webLog.Warn("connect backend ensure failed", "connect_key", connectKey, "backend", inviteBackend, "err", err)
 				if connectCtx.Err() != nil {
@@ -773,6 +872,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		s.setConnectStatus(connectKey, "pairing", "Authenticating invite with host", "", "", "", nil, false)
 		result, err := s.pairing.ConnectByURL(connectCtx, req.URL)
 		if err != nil {
 			if fallbackPeer := s.pairingFallbackPeer(req.URL, err); fallbackPeer != "" {
@@ -815,41 +915,56 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		if connErr == nil {
 			localAddr = proxy.Addr
 			proto = result.Protocol
-			s.registerConnectSession(connectKey, result.PeerID, proto, proxy)
+			resultPeerID = result.PeerID
+			backend := backendForConnectResult(result, inviteBackend)
+			if err := s.retainSessionBackend(connectCtx, backend, connectKey); err != nil {
+				connErr = err
+				proxy.Close()
+			} else {
+				s.registerConnectSession(connectKey, result.PeerID, proto, backend, proxy, pairedConnectKey(result.PeerID, result.Protocol, result.TargetPort))
+			}
 		}
 
-	case req.NodeID != "":
-		pairedBackend := s.pairing.RemoteBackend(req.NodeID)
-		if pairedBackend == "" {
-			err := fmt.Errorf("paired machine is missing invite backend; remove and pair it again")
+	case req.RemoteKey != "" || req.NodeID != "":
+		if !hasRemote {
+			err := fmt.Errorf("paired machine not found")
 			s.setConnectStatus(connectKey, "failed", "Pairing data is incomplete", "", req.NodeID, "", err, true)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		pairedBackend := strings.TrimSpace(remote.Backend)
+		if pairedBackend == "" {
+			err := fmt.Errorf("paired machine is missing invite backend; remove and pair it again")
+			s.setConnectStatus(connectKey, "failed", "Pairing data is incomplete", "", remote.NodeID, "", err, true)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		if pairedBackend != "" && s.ensureNetworkBackend != nil {
-			s.setConnectStatus(connectKey, "backend", "Starting "+pairedBackend+" backend", "", req.NodeID, "", nil, false)
+			s.setConnectStatus(connectKey, "backend", "Starting "+pairedBackend+" backend", "", remote.NodeID, "", nil, false)
+			s.retainConnectAttemptBackend(connectCtx, pairedBackend, connectKey)
+			defer s.releaseConnectAttemptBackend(pairedBackend, connectKey)
 			if err := s.ensureNetworkBackend(connectCtx, pairedBackend); err != nil {
-				webLog.Warn("connect backend ensure failed", "connect_key", connectKey, "backend", pairedBackend, "peer", shortID(req.NodeID), "err", err)
+				webLog.Warn("connect backend ensure failed", "connect_key", connectKey, "backend", pairedBackend, "peer", shortID(remote.NodeID), "err", err)
 				if connectCtx.Err() != nil {
-					s.setConnectStatus(connectKey, "canceled", "Connection canceled", "", req.NodeID, "", nil, true)
+					s.setConnectStatus(connectKey, "canceled", "Connection canceled", "", remote.NodeID, "", nil, true)
 					http.Error(w, "connection canceled", http.StatusRequestTimeout)
 					return
 				}
-				s.setConnectStatus(connectKey, "failed", "Backend startup failed", "", req.NodeID, "", err, true)
+				s.setConnectStatus(connectKey, "failed", "Backend startup failed", "", remote.NodeID, "", err, true)
 				http.Error(w, "backend startup failed: "+err.Error(), http.StatusBadGateway)
 				return
 			}
 		}
-		s.setConnectStatus(connectKey, "reauth", "Authenticating paired host", "", req.NodeID, "", nil, false)
-		result, err := s.pairing.ReauthPairedWithBackend(connectCtx, req.NodeID, pairedBackend)
+		s.setConnectStatus(connectKey, "reauth", "Authenticating paired host", "", remote.NodeID, "", nil, false)
+		result, err := s.pairing.ReauthRemoteWithBackend(connectCtx, remote, pairedBackend)
 		if err != nil {
-			webLog.Warn("connect reauth failed", "connect_key", connectKey, "peer", shortID(req.NodeID), "err", err)
+			webLog.Warn("connect reauth failed", "connect_key", connectKey, "peer", shortID(remote.NodeID), "err", err)
 			if connectCtx.Err() != nil {
-				s.setConnectStatus(connectKey, "canceled", "Connection canceled", "", req.NodeID, "", nil, true)
+				s.setConnectStatus(connectKey, "canceled", "Connection canceled", "", remote.NodeID, "", nil, true)
 				http.Error(w, "connection canceled", http.StatusRequestTimeout)
 				return
 			}
-			s.setConnectStatus(connectKey, "failed", "Paired host authentication failed", "", req.NodeID, "", err, true)
+			s.setConnectStatus(connectKey, "failed", "Paired host authentication failed", "", remote.NodeID, "", err, true)
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -871,7 +986,14 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		if connErr == nil && result.Protocol != "" {
 			localAddr = proxy.Addr
 			proto = result.Protocol
-			s.registerConnectSession(connectKey, result.PeerID, proto, proxy)
+			resultPeerID = result.PeerID
+			backend := backendForConnectResult(result, pairedBackend)
+			if err := s.retainSessionBackend(connectCtx, backend, connectKey); err != nil {
+				connErr = err
+				proxy.Close()
+			} else {
+				s.registerConnectSession(connectKey, result.PeerID, proto, backend, proxy, pairedConnectKey(result.PeerID, result.Protocol, result.TargetPort))
+			}
 		}
 
 	default:
@@ -891,16 +1013,20 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.setConnectStatus(connectKey, "ready", "Local tunnel ready", proto, "", localAddr, nil, true)
+	s.setConnectStatus(connectKey, "ready", "Local tunnel ready", proto, resultPeerID, localAddr, nil, true)
 	respond(w, map[string]any{
-		"local_addr":      localAddr,
-		"launched":        false,
-		"client":          "",
-		"protocol":        proto,
-		"error":           "",
-		"active":          true,
-		"launch_from_ui":  true,
-		"manual_fallback": true,
+		"peer_id":            resultPeerID,
+		"local_addr":         localAddr,
+		"launched":           false,
+		"client":             "",
+		"protocol":           proto,
+		"error":              "",
+		"active":             true,
+		"app_connected":      false,
+		"active_app_streams": 0,
+		"active_app_clients": 0,
+		"launch_from_ui":     true,
+		"manual_fallback":    true,
 	})
 }
 
@@ -910,8 +1036,9 @@ func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		NodeID string `json:"node_id"`
-		Key    string `json:"key"`
+		NodeID    string `json:"node_id"`
+		RemoteKey string `json:"remote_key"`
+		Key       string `json:"key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -919,7 +1046,7 @@ func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 	}
 	key := strings.TrimSpace(req.Key)
 	if key == "" {
-		key = connectRequestKey(req.NodeID, "")
+		key = connectRequestKey(req.RemoteKey, req.NodeID, "")
 	}
 	if key == "" {
 		http.Error(w, "node_id or key required", http.StatusBadRequest)
@@ -928,7 +1055,7 @@ func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 	session, ok := s.disconnectSession(key)
 	if !ok {
 		webLog.Info("disconnect requested for inactive session", "connect_key", key, "remote_addr", r.RemoteAddr)
-		respond(w, map[string]any{"status": "not_connected", "key": key, "active": false})
+		respond(w, map[string]any{"status": "not_connected", "key": key, "active": false, "connect_status": s.statusSnapshot(key)})
 		return
 	}
 	webLog.Info("connect session disconnected",
@@ -936,12 +1063,17 @@ func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 		"peer", shortID(session.Peer),
 		"local_addr", session.LocalAddr,
 		"remote_addr", r.RemoteAddr)
+	session = session.withAppActivity()
 	respond(w, map[string]any{
-		"status":     "disconnected",
-		"key":        key,
-		"peer":       session.Peer,
-		"local_addr": session.LocalAddr,
-		"active":     false,
+		"status":             "disconnected",
+		"key":                key,
+		"peer":               session.Peer,
+		"local_addr":         session.LocalAddr,
+		"active":             false,
+		"app_connected":      session.AppConnected,
+		"active_app_streams": session.ActiveAppStreams,
+		"active_app_clients": session.ActiveAppClients,
+		"connect_status":     s.statusSnapshot(key),
 	})
 }
 
@@ -951,8 +1083,9 @@ func (s *Server) handleLaunch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		NodeID string `json:"node_id"`
-		Key    string `json:"key"`
+		NodeID    string `json:"node_id"`
+		RemoteKey string `json:"remote_key"`
+		Key       string `json:"key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -960,7 +1093,7 @@ func (s *Server) handleLaunch(w http.ResponseWriter, r *http.Request) {
 	}
 	key := strings.TrimSpace(req.Key)
 	if key == "" {
-		key = connectRequestKey(req.NodeID, "")
+		key = connectRequestKey(req.RemoteKey, req.NodeID, "")
 	}
 	if key == "" {
 		http.Error(w, "node_id or key required", http.StatusBadRequest)
@@ -985,15 +1118,19 @@ func (s *Server) handleLaunch(w http.ResponseWriter, r *http.Request) {
 		"local_addr", session.LocalAddr,
 		"remote_addr", r.RemoteAddr)
 	s.setConnectStatus(key, "ready", "Tunnel ready at "+session.LocalAddr, proto, session.Peer, session.LocalAddr, nil, true)
+	session = session.withAppActivity()
 	respond(w, map[string]any{
-		"local_addr":      session.LocalAddr,
-		"launched":        false,
-		"client":          "",
-		"protocol":        proto,
-		"error":           "",
-		"active":          true,
-		"launch_from_ui":  true,
-		"manual_fallback": true,
+		"local_addr":         session.LocalAddr,
+		"launched":           false,
+		"client":             "",
+		"protocol":           proto,
+		"error":              "",
+		"active":             true,
+		"app_connected":      session.AppConnected,
+		"active_app_streams": session.ActiveAppStreams,
+		"active_app_clients": session.ActiveAppClients,
+		"launch_from_ui":     true,
+		"manual_fallback":    true,
 	})
 }
 
@@ -1003,8 +1140,9 @@ func (s *Server) handleCancelConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		NodeID string `json:"node_id"`
-		Key    string `json:"key"`
+		NodeID    string `json:"node_id"`
+		RemoteKey string `json:"remote_key"`
+		Key       string `json:"key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -1012,19 +1150,19 @@ func (s *Server) handleCancelConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	key := strings.TrimSpace(req.Key)
 	if key == "" {
-		key = connectRequestKey(req.NodeID, "")
+		key = connectRequestKey(req.RemoteKey, req.NodeID, "")
 	}
 	if key == "" {
 		http.Error(w, "node_id or key required", http.StatusBadRequest)
 		return
 	}
-	canceled := s.cancelConnect(key)
+	st, canceled := s.cancelConnect(key)
 	if !canceled {
-		respond(w, map[string]any{"status": "not_connecting", "key": key})
+		respond(w, map[string]any{"status": "not_connecting", "key": key, "connect_status": st})
 		return
 	}
 	webLog.Info("connect canceled by user", "connect_key", key, "remote_addr", r.RemoteAddr)
-	respond(w, map[string]any{"status": "canceling", "key": key})
+	respond(w, map[string]any{"status": "canceled", "key": key, "connect_status": st})
 }
 
 func tunnelStatusMessage(result *pairing.ConnectResult) string {
@@ -1060,38 +1198,57 @@ func inviteConnectErrorMessage(err error) string {
 	}
 }
 
-func (s *Server) registerConnectSession(key, peer, proto string, proxy *tunnel.LocalProxy) {
+func (s *Server) registerConnectSession(key, peer, proto, backend string, proxy *tunnel.LocalProxy, aliases ...string) {
 	if proxy == nil {
 		return
 	}
 	now := time.Now()
+	keys := uniqueConnectKeys(append([]string{key}, aliases...)...)
 	session := &connectSession{
 		Key:       key,
+		Keys:      keys,
 		Peer:      peer,
 		Protocol:  proto,
+		Backend:   backend,
 		LocalAddr: proxy.Addr,
 		StartedAt: now,
 		Proxy:     proxy,
 	}
 	s.connectMu.Lock()
-	old := s.activeSessions[key]
-	s.activeSessions[key] = session
-	st := s.connectStatus[key]
-	st.Key = key
-	st.Peer = peer
-	st.Protocol = proto
-	st.LocalAddr = proxy.Addr
-	st.Active = true
-	st.UpdatedAt = now
-	s.connectStatus[key] = st
-	s.connectMu.Unlock()
-	if old != nil && old.Proxy != nil {
-		old.Proxy.Close()
+	oldSessions := make(map[*connectSession]struct{})
+	for _, k := range keys {
+		if old := s.activeSessions[k]; old != nil && old.Proxy != proxy {
+			oldSessions[old] = struct{}{}
+		}
+		s.activeSessions[k] = session
+		st := s.connectStatus[k]
+		st.Key = k
+		st.Peer = peer
+		st.Protocol = proto
+		st.LocalAddr = proxy.Addr
+		st.Active = true
+		st.AppConnected = false
+		st.ActiveAppStreams = 0
+		st.ActiveAppClients = 0
+		st.UpdatedAt = now
+		s.connectStatus[k] = st
 	}
+	s.connectMu.Unlock()
+	for old := range oldSessions {
+		s.releaseSessionBackend(old)
+		if old.Proxy != nil {
+			old.Proxy.Close()
+		}
+	}
+	proxy.SetOnClose(func() {
+		s.markSessionClosed(key, proxy, "Tunnel disconnected")
+	})
 	webLog.Info("connect session registered",
 		"connect_key", key,
+		"aliases", keys,
 		"peer", shortID(peer),
 		"protocol", proto,
+		"backend", backend,
 		"local_addr", proxy.Addr)
 }
 
@@ -1106,33 +1263,137 @@ func (s *Server) disconnectSession(key string) (*connectSession, bool) {
 	s.connectMu.Lock()
 	session, ok := s.activeSessions[key]
 	if ok {
-		delete(s.activeSessions, key)
+		for _, k := range sessionKeys(session, key) {
+			delete(s.activeSessions, k)
+		}
 	}
-	st := s.connectStatus[key]
-	if st.Key == "" {
-		st.Key = key
+	now := time.Now()
+	for _, k := range sessionKeys(session, key) {
+		st := s.connectStatus[k]
+		if st.Key == "" {
+			st.Key = k
+		}
+		if session != nil {
+			st.Peer = session.Peer
+			st.Protocol = session.Protocol
+			st.LocalAddr = session.LocalAddr
+		}
+		st.Stage = "disconnected"
+		st.Message = "Disconnected"
+		st.Error = ""
+		st.Active = false
+		st.AppConnected = false
+		st.ActiveAppStreams = 0
+		st.ActiveAppClients = 0
+		st.Done = true
+		st.UpdatedAt = now
+		s.connectStatus[k] = st
 	}
-	if session != nil {
-		st.Peer = session.Peer
-		st.Protocol = session.Protocol
-		st.LocalAddr = session.LocalAddr
-	}
-	st.Stage = "disconnected"
-	st.Message = "Disconnected"
-	st.Error = ""
-	st.Active = false
-	st.Done = true
-	st.UpdatedAt = time.Now()
-	s.connectStatus[key] = st
 	s.connectMu.Unlock()
 
 	if session != nil && session.Proxy != nil {
 		session.Proxy.Close()
 	}
+	s.releaseSessionBackend(session)
 	return session, ok
 }
 
-func connectRequestKey(nodeID, rawURL string) string {
+func (s *Server) markSessionClosed(key string, proxy *tunnel.LocalProxy, message string) {
+	now := time.Now()
+	s.connectMu.Lock()
+	session := s.activeSessions[key]
+	if session == nil || session.Proxy != proxy {
+		s.connectMu.Unlock()
+		return
+	}
+	for _, k := range sessionKeys(session, key) {
+		delete(s.activeSessions, k)
+		st := s.connectStatus[k]
+		if st.Key == "" {
+			st.Key = k
+		}
+		st.Peer = session.Peer
+		st.Protocol = session.Protocol
+		st.LocalAddr = session.LocalAddr
+		st.Stage = "disconnected"
+		if strings.TrimSpace(message) == "" {
+			message = "Disconnected"
+		}
+		st.Message = message
+		st.Error = ""
+		st.Active = false
+		st.AppConnected = false
+		st.ActiveAppStreams = 0
+		st.ActiveAppClients = 0
+		st.Done = true
+		st.UpdatedAt = now
+		s.connectStatus[k] = st
+	}
+	s.connectMu.Unlock()
+	s.releaseSessionBackend(session)
+	webLog.Info("connect session closed",
+		"connect_key", key,
+		"peer", shortID(session.Peer),
+		"local_addr", session.LocalAddr,
+		"message", message)
+}
+
+func (s *Server) retainSessionBackend(ctx context.Context, backend string, connectKey string) error {
+	backend = strings.TrimSpace(backend)
+	if backend == "" || s.retainNetworkBackend == nil {
+		return nil
+	}
+	return s.retainNetworkBackend(ctx, backend, "connect:"+connectKey, "connect session")
+}
+
+func (s *Server) retainConnectAttemptBackend(ctx context.Context, backend string, connectKey string) {
+	backend = strings.TrimSpace(backend)
+	if backend == "" || s.retainNetworkBackend == nil {
+		return
+	}
+	if err := s.retainNetworkBackend(ctx, backend, "attempt:"+connectKey, "connect attempt"); err != nil {
+		webLog.Warn("connect attempt backend retain failed", "connect_key", connectKey, "backend", backend, "err", err)
+	}
+}
+
+func (s *Server) releaseConnectAttemptBackend(backend string, connectKey string) {
+	backend = strings.TrimSpace(backend)
+	if backend == "" || s.releaseNetworkBackend == nil {
+		return
+	}
+	s.releaseNetworkBackend(backend, "attempt:"+connectKey, "connect attempt")
+}
+
+func (s *Server) releaseSessionBackend(session *connectSession) {
+	if session == nil || s.releaseNetworkBackend == nil {
+		return
+	}
+	backend := strings.TrimSpace(session.Backend)
+	if backend == "" {
+		return
+	}
+	s.releaseNetworkBackend(backend, "connect:"+session.Key, "connect session")
+}
+
+func backendForConnectResult(result *pairing.ConnectResult, fallback string) string {
+	if result == nil {
+		return strings.TrimSpace(fallback)
+	}
+	switch {
+	case strings.TrimSpace(result.IrohTicket) != "":
+		return "iroh"
+	case strings.TrimSpace(result.BitTorrentQUICEndpoint) != "":
+		return "bittorrent_dht"
+	default:
+		return strings.TrimSpace(fallback)
+	}
+}
+
+func connectRequestKey(remoteKey, nodeID, rawURL string) string {
+	remoteKey = strings.TrimSpace(remoteKey)
+	if remoteKey != "" {
+		return "peer:" + remoteKey
+	}
 	nodeID = strings.TrimSpace(nodeID)
 	if nodeID != "" {
 		return "peer:" + nodeID
@@ -1145,6 +1406,73 @@ func connectRequestKey(nodeID, rawURL string) string {
 		return "peer:" + peerID
 	}
 	return "url:" + shortID(rawURL)
+}
+
+func pairedConnectKey(nodeID, protocol string, targetPort int) string {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return ""
+	}
+	return "peer:" + config.RemoteServiceKeyParts(nodeID, protocol, targetPort)
+}
+
+func uniqueConnectKeys(keys ...string) []string {
+	seen := make(map[string]struct{}, len(keys))
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	return out
+}
+
+func sessionKeys(session *connectSession, fallback string) []string {
+	if session != nil && len(session.Keys) > 0 {
+		return session.Keys
+	}
+	return uniqueConnectKeys(fallback)
+}
+
+func (s *connectSession) withAppActivity() *connectSession {
+	if s == nil {
+		return nil
+	}
+	out := *s
+	if s.Proxy != nil {
+		out.ActiveAppStreams = s.Proxy.ActiveStreams()
+		out.ActiveAppClients = s.Proxy.ActiveClients()
+	}
+	out.AppConnected = out.ActiveAppStreams > 0
+	return &out
+}
+
+func (s *Server) remoteByRequest(remoteKey, nodeID string) (config.RemoteConfig, bool) {
+	remoteKey = strings.TrimSpace(remoteKey)
+	if remoteKey != "" {
+		for _, remote := range s.cfg.Remotes {
+			if config.RemoteServiceKey(remote) == remoteKey {
+				return remote, true
+			}
+		}
+		return config.RemoteConfig{}, false
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return config.RemoteConfig{}, false
+	}
+	for _, remote := range s.cfg.Remotes {
+		if remote.NodeID == nodeID {
+			return remote, true
+		}
+	}
+	return config.RemoteConfig{}, false
 }
 
 func (s *Server) pairingFallbackPeer(rawURL string, err error) string {
@@ -1212,29 +1540,42 @@ func (s *Server) endConnect(key string) {
 	s.connectMu.Unlock()
 }
 
-func (s *Server) cancelConnect(key string) bool {
+func (s *Server) cancelConnect(key string) (connectStatus, bool) {
 	s.connectMu.Lock()
 	attempt := s.activeConnects[key]
 	if attempt == nil {
+		st := s.connectStatus[key]
+		if st.Key == "" {
+			st.Key = key
+		}
 		s.connectMu.Unlock()
-		return false
+		return st, false
 	}
 	cancel := attempt.Cancel
+	delete(s.activeConnects, key)
+	session := s.activeSessions[key]
+	if session != nil {
+		delete(s.activeSessions, key)
+	}
 	st := s.connectStatus[key]
 	if st.Key == "" {
 		st.Key = key
 	}
-	st.Stage = "canceling"
-	st.Message = "Canceling connection"
+	st.Stage = "canceled"
+	st.Message = "Connection canceled"
 	st.Error = ""
-	st.Done = false
+	st.Active = false
+	st.Done = true
 	st.UpdatedAt = time.Now()
 	s.connectStatus[key] = st
 	s.connectMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
-	return true
+	if session != nil && session.Proxy != nil {
+		session.Proxy.Close()
+	}
+	return st, true
 }
 
 func (s *Server) connectingState(key string) (bool, string, string) {
@@ -1262,10 +1603,42 @@ func (s *Server) activeConnectStatus(key string) (connectStatus, time.Duration) 
 	return st, age
 }
 
+func (s *Server) statusSnapshot(key string) connectStatus {
+	s.connectMu.Lock()
+	defer s.connectMu.Unlock()
+	st := s.connectStatus[key]
+	if st.Key == "" {
+		st.Key = key
+	}
+	if session := s.activeSessions[key]; session != nil {
+		active := session.withAppActivity()
+		st.Peer = active.Peer
+		st.Protocol = active.Protocol
+		st.LocalAddr = active.LocalAddr
+		st.Active = true
+		st.AppConnected = active.AppConnected
+		st.ActiveAppStreams = active.ActiveAppStreams
+		st.ActiveAppClients = active.ActiveAppClients
+	}
+	if st.UpdatedAt.IsZero() {
+		st.UpdatedAt = time.Now()
+	}
+	return st
+}
+
 func (s *Server) setConnectStatus(key, stage, message, proto, peer, localAddr string, err error, done bool) {
 	now := time.Now()
 	s.connectMu.Lock()
 	st := s.connectStatus[key]
+	if st.Stage == "canceled" && st.Done && stage != "starting" {
+		s.connectMu.Unlock()
+		webLog.Debug("connect status update ignored after cancel",
+			"connect_key", key,
+			"stage", stage,
+			"message", message,
+		)
+		return
+	}
 	if st.StartedAt.IsZero() {
 		st.StartedAt = now
 	}
@@ -1287,6 +1660,12 @@ func (s *Server) setConnectStatus(key, stage, message, proto, peer, localAddr st
 	}
 	st.UpdatedAt = now
 	st.Done = done
+	if session := s.activeSessions[key]; session != nil {
+		active := session.withAppActivity()
+		st.AppConnected = active.AppConnected
+		st.ActiveAppStreams = active.ActiveAppStreams
+		st.ActiveAppClients = active.ActiveAppClients
+	}
 	s.connectStatus[key] = st
 	s.connectMu.Unlock()
 	webLog.Info("connect status updated",
@@ -1307,7 +1686,7 @@ func (s *Server) handleConnectStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	key := strings.TrimSpace(r.URL.Query().Get("key"))
 	if key == "" {
-		key = connectRequestKey(r.URL.Query().Get("node_id"), r.URL.Query().Get("url"))
+		key = connectRequestKey(r.URL.Query().Get("remote_key"), r.URL.Query().Get("node_id"), r.URL.Query().Get("url"))
 	}
 	if key == "" {
 		http.Error(w, "key, node_id, or url required", http.StatusBadRequest)
@@ -1361,6 +1740,16 @@ func (s *Server) handleDeleteRemote(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "DELETE required", http.StatusMethodNotAllowed)
 		return
 	}
+	remoteKey := strings.TrimSpace(r.URL.Query().Get("remote_key"))
+	if remoteKey != "" {
+		if !s.cfg.RemoveRemoteService(remoteKey) {
+			http.Error(w, "remote not found", http.StatusNotFound)
+			return
+		}
+		s.cfg.Save()
+		respond(w, map[string]string{"status": "removed"})
+		return
+	}
 	nodeID := r.URL.Query().Get("node_id")
 	newRemotes := s.cfg.Remotes[:0]
 	for _, rem := range s.cfg.Remotes {
@@ -1380,11 +1769,12 @@ func (s *Server) handleRenameRemote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		NodeID string `json:"node_id"`
-		Label  string `json:"label"`
+		NodeID    string `json:"node_id"`
+		RemoteKey string `json:"remote_key"`
+		Label     string `json:"label"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.NodeID == "" || req.Label == "" {
-		http.Error(w, "node_id and label required", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.NodeID == "" && req.RemoteKey == "") || req.Label == "" {
+		http.Error(w, "node_id or remote_key and label required", http.StatusBadRequest)
 		return
 	}
 	req.Label = strings.TrimSpace(req.Label)
@@ -1394,7 +1784,13 @@ func (s *Server) handleRenameRemote(w http.ResponseWriter, r *http.Request) {
 	}
 	found := false
 	for i := range s.cfg.Remotes {
-		if s.cfg.Remotes[i].NodeID == req.NodeID {
+		matches := false
+		if req.RemoteKey != "" {
+			matches = config.RemoteServiceKey(s.cfg.Remotes[i]) == req.RemoteKey
+		} else {
+			matches = s.cfg.Remotes[i].NodeID == req.NodeID
+		}
+		if matches {
 			s.cfg.Remotes[i].Label = req.Label
 			found = true
 			break
@@ -1422,6 +1818,7 @@ func (s *Server) handleAllowed(w http.ResponseWriter, r *http.Request) {
 			"node_id":                  p.NodeID,
 			"label":                    p.Label,
 			"added_at":                 p.AddedAt,
+			"last_connected_at":        p.LastConnectedAt,
 			"conn_type":                s.node.ConnTypeFor(p.NodeID),
 			"identity_backend":         p.IdentityBackend,
 			"identity_hardware_backed": p.HardwareBacked,

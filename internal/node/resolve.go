@@ -118,6 +118,9 @@ func (n *Node) ResolveAddrs(
 // probeConnection attempts a libp2p connection to hostPeerID via relayAddrs.
 // Used to test which set of addrs is currently reachable.
 func (n *Node) probeConnection(ctx context.Context, hostPeerID string, relayAddrs []string) error {
+	if n == nil || n.Host == nil {
+		return fmt.Errorf("libp2p host is not running")
+	}
 	info, err := n.buildAddrInfo(hostPeerID, relayAddrs)
 	if err != nil {
 		return err

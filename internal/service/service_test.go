@@ -6,23 +6,23 @@ import (
 	"github.com/rdpanywhere/rdpanywhere/internal/config"
 )
 
-func TestShouldRunIrohBackendOnlyWhenActive(t *testing.T) {
+func TestShouldRunIrohSidecarBackendOnlyWhenActive(t *testing.T) {
 	cfg := &config.Config{
 		Network: config.NetworkConfig{ShareBackend: "libp2p_dht"},
 		Iroh:    config.IrohConfig{Mode: "public"},
 	}
 
-	if shouldRunIrohBackend(cfg) {
+	if shouldRunIrohSidecarBackend(cfg) {
 		t.Fatal("iroh should not run when active backend is dht")
 	}
 
 	cfg.Network.ShareBackend = "iroh"
-	if !shouldRunIrohBackend(cfg) {
+	if !shouldRunIrohSidecarBackend(cfg) {
 		t.Fatal("iroh should run when active backend is iroh and mode is public")
 	}
 
 	cfg.Iroh.Mode = "disabled"
-	if shouldRunIrohBackend(cfg) {
+	if shouldRunIrohSidecarBackend(cfg) {
 		t.Fatal("iroh should not run when iroh mode is disabled")
 	}
 }

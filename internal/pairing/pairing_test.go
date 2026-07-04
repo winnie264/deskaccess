@@ -6,7 +6,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"net/url"
+	urlpkg "net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/rdpanywhere/rdpanywhere/internal/config"
+	"github.com/rdpanywhere/rdpanywhere/internal/netbackend"
 	"github.com/rdpanywhere/rdpanywhere/internal/node"
 	"github.com/rdpanywhere/rdpanywhere/internal/pairing"
 	"github.com/rdpanywhere/rdpanywhere/internal/rendezvous"
@@ -94,6 +96,13 @@ func TestGenerateURL_OnetimeRDP(t *testing.T) {
 	if url == "" {
 		t.Fatal("URL is empty")
 	}
+	parsedURL, err := urlpkg.Parse(url)
+	if err != nil {
+		t.Fatalf("parse URL: %v", err)
+	}
+	if got := parsedURL.Query().Get("v"); got != "1" {
+		t.Fatalf("invite version = %q, want 1", got)
+	}
 	tok, err := rendezvous.DecodeURL(url)
 	if err != nil {
 		t.Fatalf("DecodeURL: %v", err)
@@ -131,6 +140,30 @@ func TestGenerateURL_OnetimeRDP(t *testing.T) {
 	}
 	if view.Status != "pending" {
 		t.Errorf("view.status: want pending, got %s", view.Status)
+	}
+}
+
+func TestConnectByURL_UnsupportedInviteVersionAsksUpgrade(t *testing.T) {
+	cfg := newTestConfig(t, "client")
+	mgr := newManager(t, cfg)
+	rawURL, _, err := mgr.GenerateURL("onetime", 15*time.Minute, "", "rdp", 3389)
+	if err != nil {
+		t.Fatalf("GenerateURL: %v", err)
+	}
+	parsed, err := urlpkg.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse invite URL: %v", err)
+	}
+	q := parsed.Query()
+	q.Set("v", "2")
+	parsed.RawQuery = q.Encode()
+
+	_, err = mgr.ConnectByURL(context.Background(), parsed.String())
+	if err == nil {
+		t.Fatal("ConnectByURL succeeded for unsupported invite version")
+	}
+	if !strings.Contains(err.Error(), "upgrade DeskAccess") {
+		t.Fatalf("error = %q, want upgrade guidance", err.Error())
 	}
 }
 
@@ -450,7 +483,7 @@ func TestGeneratedInviteCarriesNetworkBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateURL: %v", err)
 	}
-	parsed, err := url.Parse(rawURL)
+	parsed, err := urlpkg.Parse(rawURL)
 	if err != nil {
 		t.Fatalf("parse invite URL: %v", err)
 	}
@@ -467,9 +500,14 @@ func TestLibp2pDHTInviteDoesNotFallbackToOtherBackends(t *testing.T) {
 	cfg.BTDHT.Mode = "disabled"
 	cfg.Relay.Mode = "disabled"
 	cfg.NormalizeNetworkBackend()
-	mgr := newManager(t, cfg)
+	n := newTestNode(t, newLibp2pHost(t), cfg)
 
-	_, err := mgr.TestResolveInviteAddrsForBackend(context.Background(), "libp2p_dht", mgr.NodeIDForTest(), "")
+	backend := netbackend.NewLibp2p(n)
+	_, err := backend.OpenPairingSession(context.Background(), netbackend.PairingTarget{
+		Backend:      netbackend.BackendLibp2pDHT,
+		PeerID:       n.NodeID(),
+		PublicKeyHex: "",
+	})
 	if err == nil {
 		t.Fatal("expected DHT resolution to fail without falling back")
 	}

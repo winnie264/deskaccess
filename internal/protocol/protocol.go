@@ -84,10 +84,13 @@ type IdentityProof struct {
 // PairRequest is sent by the client on the pairing stream.
 type PairRequest struct {
 	Version     uint8           `json:"v"`
+	NodeID      string          `json:"node_id,omitempty"` // DeskAccess/libp2p node id; transport peer id may differ for sidecars
 	InviteID    []byte          `json:"invite_id,omitempty"`
 	Proof       []byte          `json:"proof,omitempty"`
-	Mode        string          `json:"mode"`             // "onetime" | "pairing" | "trusted"
-	Label       string          `json:"label"`            // client machine name
+	Mode        string          `json:"mode"`               // "onetime" | "pairing" | "trusted"
+	Label       string          `json:"label"`              // client machine name
+	Protocol    string          `json:"protocol,omitempty"` // requested protocol for trusted reauth
+	TargetPort  int             `json:"target_port,omitempty"`
 	Attestation *TPMAttestation `json:"attest,omitempty"` // present if client has TPM
 	Identity    *IdentityProof  `json:"identity,omitempty"`
 }
@@ -112,6 +115,7 @@ type PairResponse struct {
 // loopback target, then switch to raw TCP bytes after TunnelReady.
 type TunnelHello struct {
 	Version      uint8  `json:"v"`
+	NodeID       string `json:"node_id,omitempty"` // DeskAccess/libp2p node id; transport peer id may differ for sidecars
 	Method       string `json:"method,omitempty"`
 	SessionToken []byte `json:"token"`
 	TargetHost   string `json:"target_host,omitempty"`
@@ -154,11 +158,27 @@ func WriteFrame(w io.Writer, t MsgType, payload any) error {
 	var header [5]byte
 	header[0] = byte(t)
 	binary.BigEndian.PutUint32(header[1:], uint32(len(data)))
-	if _, err := w.Write(header[:]); err != nil {
+	if err := writeAll(w, header[:]); err != nil {
 		return fmt.Errorf("write header: %w", err)
 	}
-	if _, err := w.Write(data); err != nil {
+	if err := writeAll(w, data); err != nil {
 		return fmt.Errorf("write payload: %w", err)
+	}
+	return nil
+}
+
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if n > 0 {
+			data = data[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
 	}
 	return nil
 }

@@ -7,13 +7,16 @@
     UpgradeCode="{6F338191-AC4C-4B99-A123-860F65216CB0}"
     Scope="perMachine">
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of DeskAccess is already installed." />
+    <MajorUpgrade
+      AllowSameVersionUpgrades="yes"
+      DowngradeErrorMessage="A newer version of DeskAccess is already installed." />
     <MediaTemplate EmbedCab="yes" />
     <Icon Id="DeskAccessIcon" SourceFile="$(var.SourceDir)\DeskAccess.ico" />
     <Property Id="ARPPRODUCTICON" Value="DeskAccessIcon" />
 
     <Feature Id="MainFeature" Title="DeskAccess" Level="1">
       <ComponentRef Id="AppExecutable" />
+      <ComponentRef Id="IrohSidecarExecutable" />
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>
 
@@ -60,6 +63,15 @@
         <RegistryKey Root="HKCR" Key="deskaccess\shell\open\command">
           <RegistryValue Type="string" Value="&quot;[#DeskAccessExe]&quot; &quot;%1&quot;" />
         </RegistryKey>
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="IrohSidecarExecutable" Guid="{7EA9B07E-67D8-47D9-90B5-9C10AE7308E3}">
+        <File
+          Id="IrohSidecarExe"
+          Source="$(var.SourceDir)\deskaccess-iroh-sidecar.exe"
+          KeyPath="yes" />
       </Component>
     </DirectoryRef>
 

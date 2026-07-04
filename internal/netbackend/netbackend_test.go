@@ -52,3 +52,40 @@ func TestRegistryMustGetMissingBackend(t *testing.T) {
 		t.Fatal("missing backend should return an error")
 	}
 }
+
+type fakeLifecycleBackend struct {
+	fakeStreamBackend
+	started string
+	stopped bool
+}
+
+func (f *fakeLifecycleBackend) Start(_ context.Context, backend string) error {
+	f.started = backend
+	return nil
+}
+
+func (f *fakeLifecycleBackend) Stop(context.Context) error {
+	f.stopped = true
+	return nil
+}
+
+func (f *fakeLifecycleBackend) Running() bool { return f.started != "" && !f.stopped }
+
+func TestRegistryLifecycleStartStop(t *testing.T) {
+	reg := NewRegistry()
+	backend := &fakeLifecycleBackend{fakeStreamBackend: fakeStreamBackend{name: "primary"}}
+	reg.Register(backend, "alias")
+
+	if err := reg.Start(context.Background(), "alias"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if backend.started != "alias" {
+		t.Fatalf("started backend = %q, want alias", backend.started)
+	}
+	if err := reg.Stop(context.Background(), "alias"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if !backend.stopped {
+		t.Fatal("backend was not stopped")
+	}
+}

@@ -11,6 +11,7 @@ $stage = Join-Path $out "stage\DeskAccess-msi"
 $packages = Join-Path $out "packages"
 $pkg = "./cmd/deskaccess"
 $wxs = Join-Path $PSScriptRoot "windows\DeskAccess.wxs"
+$sidecarManifest = Join-Path $root "sidecars\iroh-sidecar\Cargo.toml"
 
 function Invoke-Checked {
   param(
@@ -66,6 +67,7 @@ try {
   Remove-Item -Force (Join-Path $packages "SHA256SUMS.txt") -ErrorAction SilentlyContinue
 
   $exe = Join-Path $stage "DeskAccess.exe"
+  $sidecarExe = Join-Path $stage "deskaccess-iroh-sidecar.exe"
   $msi = Join-Path $packages "DeskAccess-$Version-windows-amd64.msi"
   $wix = Resolve-Wix
 
@@ -75,11 +77,23 @@ try {
   Remove-Item Env:\GOARM -ErrorAction SilentlyContinue
   Invoke-Checked "go" @(
     "build",
+    "-buildvcs=false",
     "-ldflags", "-s -w -H=windowsgui -X main.version=$Version",
     "-o", $exe,
     $pkg
   )
   Copy-Item -Force (Join-Path $root "resources\deskview.ico") (Join-Path $stage "DeskAccess.ico")
+
+  Write-Host "==> Building Windows iroh sidecar"
+  Invoke-Checked "cargo" @(
+    "build",
+    "--manifest-path", $sidecarManifest,
+    "--release",
+    "--target", "x86_64-pc-windows-msvc"
+  )
+  Copy-Item -Force `
+    (Join-Path $root "sidecars\iroh-sidecar\target\x86_64-pc-windows-msvc\release\deskaccess-iroh-sidecar.exe") `
+    $sidecarExe
 
   Write-Host "==> Building MSI"
   $wixArgs = @(
