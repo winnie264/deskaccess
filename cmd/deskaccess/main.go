@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -42,6 +43,7 @@ func main() {
 		svcUninstall = flag.Bool("uninstall", false, "Uninstall system service")
 		runSvc       = flag.Bool("service", false, "Run as system service (called by OS)")
 		standalone   = flag.Bool("standalone", false, "Run backend and web UI in this process")
+		openUI       = flag.Bool("ui", false, "Open the dashboard from the running service")
 		connectURL   = flag.String("connect", "", "Connect to a remote via deskaccess:// URL")
 		generate     = flag.Bool("generate", false, "Generate a pairing invite via running service")
 		protocol     = flag.String("protocol", "", "Invite protocol: rdp, ssh, vnc, or custom")
@@ -87,6 +89,9 @@ func main() {
 
 	case *standalone:
 		runStandalone()
+
+	case *openUI:
+		openDashboardFromServiceOrExit()
 
 	case *connectURL != "":
 		// Client mode: connect to remote via invite URL
@@ -194,6 +199,31 @@ func openDashboardFromService() bool {
 	}
 	tray.ShowDashboard(st.WebuiURL)
 	return true
+}
+
+func openDashboardFromServiceOrExit() {
+	deadline := time.Now().Add(15 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		st, err := ipc.Query(ipc.Request{Cmd: "status"})
+		if err == nil && st != nil && st.Error == "" && st.WebuiURL != "" {
+			if tray.HasDesktopDisplay() {
+				tray.ShowDashboard(st.WebuiURL)
+			} else {
+				fmt.Println(st.WebuiURL)
+			}
+			return
+		}
+		if err != nil {
+			lastErr = err
+		} else if st != nil && st.Error != "" {
+			lastErr = errors.New(st.Error)
+		} else {
+			lastErr = errors.New("service did not return a dashboard URL")
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	log.Fatalf("service not reachable: %v", lastErr)
 }
 
 // runTray is the tray process. It connects to the daemon via IPC.

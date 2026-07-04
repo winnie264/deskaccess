@@ -9,8 +9,6 @@ if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database /usr/share/applications || true
 fi
 
-rm -f /etc/sysctl.d/99-deskaccess-quic.conf
-
 if [ "$1" = "purge" ]; then
   rm -rf /etc/deskaccess /var/lib/deskaccess
   userdel deskaccess 2>/dev/null || true

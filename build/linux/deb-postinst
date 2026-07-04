@@ -13,10 +13,6 @@ fi
 mkdir -p /etc/deskaccess /var/lib/deskaccess
 chown deskaccess:deskaccess /etc/deskaccess /var/lib/deskaccess
 
-if command -v sysctl >/dev/null 2>&1 && [ -f /etc/sysctl.d/99-deskaccess-quic.conf ]; then
-  sysctl -p /etc/sysctl.d/99-deskaccess-quic.conf >/dev/null || true
-fi
-
 add_user_to_group() {
   user="$1"
   if [ -n "$user" ] && [ "$user" != "root" ] && id "$user" >/dev/null 2>&1; then

@@ -132,14 +132,19 @@ func (b *Backend) startProcess(ctx context.Context, command string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	sidecarLogPath, logErr := prepareSidecarLogFile()
+	if logErr != nil {
+		log.Warn("iroh sidecar log file setup failed", "err", logErr)
+	}
 	cmd := exec.Command(command, args...)
+	cmd.Env = sidecarEnv(os.Environ(), sidecarLogPath)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start iroh sidecar %q: %w", command, err)
 	}
 	b.cmd = cmd
 	cmdDone := make(chan error, 1)
 	b.cmdDone = cmdDone
-	log.Info("iroh sidecar process started", "command", command, "args", args, "pid", cmd.Process.Pid)
+	log.Info("iroh sidecar process started", "command", command, "args", args, "pid", cmd.Process.Pid, "log_file", sidecarLogPath)
 	go func() {
 		err := cmd.Wait()
 		cmdDone <- err
@@ -163,6 +168,96 @@ func (b *Backend) startProcess(ctx context.Context, command string) error {
 		return err
 	}
 	return nil
+}
+
+func sidecarEnv(base []string, logPath string) []string {
+	env := make([]string, 0, len(base)+2)
+	for _, item := range base {
+		key := item
+		if idx := strings.IndexByte(item, '='); idx >= 0 {
+			key = item[:idx]
+		}
+		if strings.EqualFold(key, "DESKACCESS_IROH_SIDECAR_LOG") || strings.EqualFold(key, "DESKACCESS_LOG_DIR") {
+			continue
+		}
+		env = append(env, item)
+	}
+	if logPath != "" {
+		env = append(env, "DESKACCESS_IROH_SIDECAR_LOG="+logPath)
+		env = append(env, "DESKACCESS_LOG_DIR="+filepath.Dir(logPath))
+	}
+	return env
+}
+
+func prepareSidecarLogFile() (string, error) {
+	var lastErr error
+	for _, path := range sidecarLogCandidates() {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			lastErr = fmt.Errorf("%s: %w", path, err)
+			continue
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			lastErr = fmt.Errorf("%s: %w", path, err)
+			continue
+		}
+		fmt.Fprintf(f, `{"time":%q,"level":"INFO","msg":"iroh sidecar log bootstrap","component":"iroh_sidecar","log_file":%q}`+"\n", time.Now().Format(time.RFC3339Nano), path)
+		_ = f.Close()
+		return path, nil
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", fmt.Errorf("no iroh sidecar log file path available")
+}
+
+func sidecarLogCandidates() []string {
+	var candidates []string
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		for _, existing := range candidates {
+			if existing == path {
+				return
+			}
+		}
+		candidates = append(candidates, path)
+	}
+	add(os.Getenv("DESKACCESS_IROH_SIDECAR_LOG"))
+	if dir := os.Getenv("DESKACCESS_LOG_DIR"); dir != "" {
+		add(filepath.Join(dir, "deskaccess-iroh-sidecar.log"))
+	}
+	if current := logger.CurrentLogFile(); current != "" {
+		add(filepath.Join(filepath.Dir(current), "deskaccess-iroh-sidecar.log"))
+	}
+	if runtime.GOOS == "windows" {
+		if dir := os.Getenv("ProgramData"); dir != "" {
+			add(filepath.Join(dir, "DeskAccess", "deskaccess-iroh-sidecar.log"))
+		}
+		if dir := os.Getenv("APPDATA"); dir != "" {
+			add(filepath.Join(dir, "DeskAccess", "deskaccess-iroh-sidecar.log"))
+		}
+		if dir := os.Getenv("LOCALAPPDATA"); dir != "" {
+			add(filepath.Join(dir, "DeskAccess", "deskaccess-iroh-sidecar.log"))
+		}
+	} else {
+		add(filepath.Join(string(filepath.Separator), "var", "lib", "deskaccess", "deskaccess-iroh-sidecar.log"))
+		if dir := os.Getenv("XDG_STATE_HOME"); dir != "" {
+			add(filepath.Join(dir, "DeskAccess", "deskaccess-iroh-sidecar.log"))
+		}
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			add(filepath.Join(home, ".local", "share", "DeskAccess", "deskaccess-iroh-sidecar.log"))
+		}
+	}
+	if dir, err := os.Getwd(); err == nil {
+		add(filepath.Join(dir, ".deskaccess-logs", "deskaccess-iroh-sidecar.log"))
+	}
+	return candidates
 }
 
 func createReadyFile() (*os.File, error) {

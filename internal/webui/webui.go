@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/rdpanywhere/rdpanywhere/internal/pairing"
 	"github.com/rdpanywhere/rdpanywhere/internal/presence"
 	"github.com/rdpanywhere/rdpanywhere/internal/rdpcheck"
+	"github.com/rdpanywhere/rdpanywhere/internal/rendezvous"
 	"github.com/rdpanywhere/rdpanywhere/internal/tunnel"
 )
 
@@ -95,6 +97,8 @@ type connectSession struct {
 	Keys             []string
 	Peer             string
 	Protocol         string
+	Mode             string
+	TargetPort       int
 	Backend          string
 	LocalAddr        string
 	StartedAt        time.Time
@@ -245,6 +249,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/status", s.handleStatus)
 	s.mux.HandleFunc("/api/status/refresh", s.handleStatusRefresh)
 	s.mux.HandleFunc("/api/remotes", s.handleRemotes)
+	s.mux.HandleFunc("/api/active-connections", s.handleActiveConnections)
 	s.mux.HandleFunc("/api/url/onetime", s.handleURLOneTime)
 	s.mux.HandleFunc("/api/url/pairing", s.handleURLPairing)
 	s.mux.HandleFunc("/api/invites", s.handleInvites)             // GET list
@@ -664,6 +669,68 @@ func (s *Server) handleRemotes(w http.ResponseWriter, r *http.Request) {
 	respond(w, statuses)
 }
 
+func (s *Server) handleActiveConnections(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	pairedKeys := make(map[string]struct{}, len(s.cfg.Remotes))
+	for _, remote := range s.cfg.Remotes {
+		pairedKeys["peer:"+config.RemoteServiceKey(remote)] = struct{}{}
+	}
+
+	s.connectMu.Lock()
+	seen := make(map[*connectSession]struct{})
+	sessions := make([]*connectSession, 0, len(s.activeSessions))
+	for _, session := range s.activeSessions {
+		if session == nil {
+			continue
+		}
+		if _, ok := seen[session]; ok {
+			continue
+		}
+		seen[session] = struct{}{}
+		paired := false
+		for _, key := range sessionKeys(session, session.Key) {
+			if _, ok := pairedKeys[key]; ok {
+				paired = true
+				break
+			}
+		}
+		if strings.EqualFold(session.Mode, "onetime") || !paired {
+			sessions = append(sessions, session)
+		}
+	}
+	s.connectMu.Unlock()
+
+	out := make([]map[string]any, 0, len(sessions))
+	for _, session := range sessions {
+		session = session.withAppActivity()
+		connType := node.ConnUnknown
+		connectionAddr := ""
+		if session.Proxy != nil {
+			connType = node.ConnType(session.Proxy.ConnectionPath())
+			connectionAddr = session.Proxy.ConnectionAddr()
+		}
+		out = append(out, map[string]any{
+			"key":                session.Key,
+			"peer":               session.Peer,
+			"protocol":           session.Protocol,
+			"mode":               session.Mode,
+			"target_port":        session.TargetPort,
+			"backend":            session.Backend,
+			"local_addr":         session.LocalAddr,
+			"started_at":         session.StartedAt,
+			"conn_type":          connType,
+			"connection_addr":    connectionAddr,
+			"app_connected":      session.AppConnected,
+			"active_app_streams": session.ActiveAppStreams,
+			"active_app_clients": session.ActiveAppClients,
+		})
+	}
+	respond(w, out)
+}
+
 // POST /api/url/onetime
 func (s *Server) handleURLOneTime(w http.ResponseWriter, r *http.Request) {
 	s.handleGenerateURL(w, r, "onetime")
@@ -921,7 +988,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 				connErr = err
 				proxy.Close()
 			} else {
-				s.registerConnectSession(connectKey, result.PeerID, proto, backend, proxy, pairedConnectKey(result.PeerID, result.Protocol, result.TargetPort))
+				s.registerConnectSession(connectKey, result.PeerID, proto, result.Mode, result.TargetPort, backend, proxy, pairedConnectKey(result.PeerID, result.Protocol, result.TargetPort))
 			}
 		}
 
@@ -992,7 +1059,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 				connErr = err
 				proxy.Close()
 			} else {
-				s.registerConnectSession(connectKey, result.PeerID, proto, backend, proxy, pairedConnectKey(result.PeerID, result.Protocol, result.TargetPort))
+				s.registerConnectSession(connectKey, result.PeerID, proto, result.Mode, result.TargetPort, backend, proxy, pairedConnectKey(result.PeerID, result.Protocol, result.TargetPort))
 			}
 		}
 
@@ -1198,21 +1265,23 @@ func inviteConnectErrorMessage(err error) string {
 	}
 }
 
-func (s *Server) registerConnectSession(key, peer, proto, backend string, proxy *tunnel.LocalProxy, aliases ...string) {
+func (s *Server) registerConnectSession(key, peer, proto, mode string, targetPort int, backend string, proxy *tunnel.LocalProxy, aliases ...string) {
 	if proxy == nil {
 		return
 	}
 	now := time.Now()
 	keys := uniqueConnectKeys(append([]string{key}, aliases...)...)
 	session := &connectSession{
-		Key:       key,
-		Keys:      keys,
-		Peer:      peer,
-		Protocol:  proto,
-		Backend:   backend,
-		LocalAddr: proxy.Addr,
-		StartedAt: now,
-		Proxy:     proxy,
+		Key:        key,
+		Keys:       keys,
+		Peer:       peer,
+		Protocol:   proto,
+		Mode:       mode,
+		TargetPort: targetPort,
+		Backend:    backend,
+		LocalAddr:  proxy.Addr,
+		StartedAt:  now,
+		Proxy:      proxy,
 	}
 	s.connectMu.Lock()
 	oldSessions := make(map[*connectSession]struct{})
@@ -1296,6 +1365,31 @@ func (s *Server) disconnectSession(key string) (*connectSession, bool) {
 	}
 	s.releaseSessionBackend(session)
 	return session, ok
+}
+
+func (s *Server) removeRemoteConnectState(remoteKey string) {
+	remoteKey = strings.TrimSpace(remoteKey)
+	if remoteKey == "" {
+		return
+	}
+	connectKey := "peer:" + remoteKey
+	session, _ := s.disconnectSession(connectKey)
+
+	s.connectMu.Lock()
+	keys := []string{connectKey}
+	if session != nil {
+		keys = sessionKeys(session, connectKey)
+	}
+	for _, key := range keys {
+		if attempt := s.activeConnects[key]; attempt != nil && attempt.Cancel != nil {
+			attempt.Cancel()
+		}
+		delete(s.activeConnects, key)
+		delete(s.connectStatus, key)
+	}
+	s.connectMu.Unlock()
+
+	webLog.Info("removed paired remote connection state", "remote_key", remoteKey, "had_session", session != nil)
 }
 
 func (s *Server) markSessionClosed(key string, proxy *tunnel.LocalProxy, message string) {
@@ -1477,6 +1571,15 @@ func (s *Server) remoteByRequest(remoteKey, nodeID string) (config.RemoteConfig,
 
 func (s *Server) pairingFallbackPeer(rawURL string, err error) string {
 	if err == nil || !strings.Contains(err.Error(), "link already used") {
+		return ""
+	}
+	tok, decodeErr := rendezvous.DecodeURL(rawURL)
+	if decodeErr != nil || tok.ModeString() != "pairing" {
+		mode := ""
+		if tok != nil {
+			mode = tok.ModeString()
+		}
+		webLog.Info("used invite link is not eligible for paired fallback", "mode", mode)
 		return ""
 	}
 	peerID := pairing.InvitePeerID(rawURL)
@@ -1746,19 +1849,39 @@ func (s *Server) handleDeleteRemote(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "remote not found", http.StatusNotFound)
 			return
 		}
-		s.cfg.Save()
+		s.removeRemoteConnectState(remoteKey)
+		if err := s.cfg.Save(); err != nil {
+			http.Error(w, "save failed", http.StatusInternalServerError)
+			return
+		}
 		respond(w, map[string]string{"status": "removed"})
 		return
 	}
-	nodeID := r.URL.Query().Get("node_id")
-	newRemotes := s.cfg.Remotes[:0]
-	for _, rem := range s.cfg.Remotes {
-		if rem.NodeID != nodeID {
-			newRemotes = append(newRemotes, rem)
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	protocol := strings.TrimSpace(r.URL.Query().Get("protocol"))
+	targetPort := 0
+	if rawPort := strings.TrimSpace(r.URL.Query().Get("target_port")); rawPort != "" {
+		parsed, err := strconv.Atoi(rawPort)
+		if err != nil || parsed <= 0 || parsed > 65535 {
+			http.Error(w, "invalid target_port", http.StatusBadRequest)
+			return
 		}
+		targetPort = parsed
 	}
-	s.cfg.Remotes = newRemotes
-	s.cfg.Save()
+	if nodeID == "" || protocol == "" || targetPort <= 0 {
+		http.Error(w, "remote_key or node_id+protocol+target_port required", http.StatusBadRequest)
+		return
+	}
+	remoteKey = config.RemoteServiceKeyParts(nodeID, protocol, targetPort)
+	if !s.cfg.RemoveRemoteService(remoteKey) {
+		http.Error(w, "remote not found", http.StatusNotFound)
+		return
+	}
+	s.removeRemoteConnectState(remoteKey)
+	if err := s.cfg.Save(); err != nil {
+		http.Error(w, "save failed", http.StatusInternalServerError)
+		return
+	}
 	respond(w, map[string]string{"status": "removed"})
 }
 

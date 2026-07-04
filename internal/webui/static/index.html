@@ -232,6 +232,14 @@
 <!-- ═══════════════════════════ TAB: CONNECT ════════════════════════════════ -->
 <div id="tab-connect" class="tab-pane active">
 
+  <!-- Active one-time connections -->
+  <div class="section" id="active-section" style="display:none;">
+    <div class="section-title-row">
+      <h2>Active connections <span id="active-badge" style="color:#2563eb;font-size:11px;"></span></h2>
+    </div>
+    <div class="remote-list" id="active-list"></div>
+  </div>
+
   <!-- Paired machines -->
   <div class="section">
     <div class="section-title-row">
@@ -680,6 +688,7 @@ async function refreshNetworkStatus() {
 }
 
 async function refreshPairedMachines() {
+  await loadActiveConnections();
   await loadRemotes();
   showToast('Paired machines refreshed');
 }
@@ -739,7 +748,51 @@ async function applyMachineName(name) {
 
 // ── Remotes ───────────────────────────────────────────────────────────────────
 let latestRemotes = [];
+let latestActiveConnections = [];
 const connectionStates = {};
+
+async function loadActiveConnections() {
+  const r = await fetch('/api/active-connections');
+  const list = await r.json();
+  renderActiveConnections(list);
+}
+
+function renderActiveConnections(list) {
+  latestActiveConnections = Array.isArray(list) ? list : [];
+  const section = document.getElementById('active-section');
+  const badge = document.getElementById('active-badge');
+  const el = document.getElementById('active-list');
+  if (!latestActiveConnections.length) {
+    section.style.display = 'none';
+    badge.textContent = '';
+    el.innerHTML = '';
+    return;
+  }
+  section.style.display = '';
+  badge.textContent = `${latestActiveConnections.length} active`;
+  el.innerHTML = latestActiveConnections.map(c => {
+    const key = c.key || '';
+    const proto = c.protocol || 'rdp';
+    const streams = Number(c.active_app_streams || 0);
+    const appText = streams > 0 ? `App connected · ${streams} stream${streams === 1 ? '' : 's'}` : 'Tunnel ready';
+    return `
+    <div class="remote-card">
+      <div class="dot online"></div>
+      <div class="remote-info">
+        <div class="remote-name">
+          <span class="remote-name-text">${launchProtocolLabel(proto)} one-time session</span>
+        </div>
+        <div class="remote-status">
+          ${esc(appText)} · ${esc(c.local_addr || '')} ${c.conn_type ? connBadge(c.conn_type) : ''}
+        </div>
+      </div>
+      <div class="remote-btns">
+        ${c.local_addr ? `<button class="btn btn-secondary" onclick="copyActiveAddr('${key}')">Copy Address</button>` : ''}
+        <button class="btn btn-danger" onclick="disconnectActive('${key}')">Disconnect</button>
+      </div>
+    </div>`;
+  }).join('');
+}
 
 async function loadRemotes() {
   const r = await fetch('/api/remotes');
@@ -1416,9 +1469,12 @@ async function doConnect() {
       const result = await r.json();
       await handleLaunchResult(result);
       document.getElementById('url-input').value = '';
+      await loadActiveConnections();
       await loadRemotes();
     } else {
       const msg = await responseError(r);
+      await loadActiveConnections();
+      await loadRemotes();
       showToast(msg, true);
       showErrorDialog('Connection failed', msg);
     }
@@ -1739,9 +1795,45 @@ function copyRemoteAddr(nodeId) {
   showToast('Address copied');
 }
 
-async function removeRemote(nodeId) {
-  await fetch('/api/remotes/delete?remote_key=' + encodeURIComponent(nodeId), { method: 'DELETE' });
-  loadRemotes();
+function copyActiveAddr(key) {
+  const active = latestActiveConnections.find(c => c.key === key);
+  if (!active || !active.local_addr) {
+    showToast('No local address available', true);
+    return;
+  }
+  navigator.clipboard.writeText(active.local_addr);
+  showToast('Address copied');
+}
+
+async function disconnectActive(key) {
+  const r = await fetch('/api/disconnect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key })
+  });
+  if (!r.ok) {
+    const msg = await responseError(r);
+    showToast(msg, true);
+    return;
+  }
+  showToast('Disconnected');
+  await loadActiveConnections();
+}
+
+async function removeRemote(remoteServiceKey) {
+  const remote = latestRemotes.find(r => remoteKey(r) === remoteServiceKey) || {};
+  const params = new URLSearchParams();
+  params.set('remote_key', remoteServiceKey);
+  if (remote.node_id) params.set('node_id', remote.node_id);
+  if (remote.protocol) params.set('protocol', remote.protocol);
+  if (remote.target_port) params.set('target_port', String(remote.target_port));
+  const r = await fetch('/api/remotes/delete?' + params.toString(), { method: 'DELETE' });
+  if (!r.ok) {
+    const msg = await responseError(r);
+    showToast(msg, true);
+    return;
+  }
+  await loadRemotes();
 }
 
 // ── Allowed machines ─────────────────────────────────────────────────────────
@@ -2013,13 +2105,17 @@ function closeErrorDialog() {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 loadStatus();
+loadActiveConnections();
 loadRemotes();
 loadInvites();
 loadAllowed();
 loadConfig();
 scanPorts('rdp');
 setInterval(loadStatus, 10000);
-setInterval(loadRemotes, 30000);
+setInterval(() => {
+  loadActiveConnections();
+  loadRemotes();
+}, 30000);
 setInterval(loadInvites, 15000);
 setInterval(loadAllowed, 15000);
 </script>

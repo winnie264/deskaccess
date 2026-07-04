@@ -60,21 +60,6 @@ fi
 mkdir -p /etc/deskaccess /var/lib/deskaccess
 chown deskaccess:deskaccess /etc/deskaccess /var/lib/deskaccess
 
-# Increase UDP socket buffers for QUIC transports used by iroh and
-# BitTorrent-DHT direct mode. This matches quic-go's recommended value.
-if [ -f deskaccess-quic.conf ]; then
-  install -Dm 644 deskaccess-quic.conf /etc/sysctl.d/99-deskaccess-quic.conf
-else
-  mkdir -p /etc/sysctl.d
-  cat >/etc/sysctl.d/99-deskaccess-quic.conf <<'EOF'
-net.core.rmem_max = 7500000
-net.core.wmem_max = 7500000
-EOF
-fi
-if command -v sysctl >/dev/null 2>&1; then
-  sysctl -p /etc/sysctl.d/99-deskaccess-quic.conf >/dev/null || true
-fi
-
 # Install systemd service
 install -m 644 deskaccess.service /etc/systemd/system/
 

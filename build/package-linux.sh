@@ -62,7 +62,6 @@ cp "$ROOT/build/linux/install.sh" "$pkg_stage/"
 cp "$ROOT/build/linux/uninstall.sh" "$pkg_stage/"
 cp "$ROOT/build/linux/deskaccess.service" "$pkg_stage/"
 cp "$ROOT/build/linux/deskaccess.desktop" "$pkg_stage/"
-cp "$ROOT/build/linux/deskaccess-quic.conf" "$pkg_stage/"
 cp "$ROOT/resources/deskview-256.png" "$pkg_stage/deskaccess.png"
 
 tar_pkg="$PACKAGES/deskaccess-$VERSION-$package_slug.tar.gz"
@@ -81,14 +80,12 @@ mkdir -p \
   "$deb_root/usr/share/applications" \
   "$deb_root/usr/share/icons/hicolor/256x256/apps" \
   "$deb_root/lib/systemd/system" \
-  "$deb_root/etc/sysctl.d" \
   "$deb_root/etc/deskaccess" \
   "$deb_root/var/lib/deskaccess"
 
 install -m 755 "$pkg_stage/deskaccess-$target" "$deb_root/usr/bin/deskaccess"
 install -m 755 "$pkg_stage/deskaccess-iroh-sidecar" "$deb_root/usr/bin/deskaccess-iroh-sidecar"
 install -m 644 "$ROOT/resources/deskview-256.png" "$deb_root/usr/share/icons/hicolor/256x256/apps/deskaccess.png"
-install -m 644 "$ROOT/build/linux/deskaccess-quic.conf" "$deb_root/etc/sysctl.d/99-deskaccess-quic.conf"
 sed 's#^Exec=.*#Exec=sh -c '\''if [ -n "$1" ]; then exec /usr/bin/deskaccess "$1"; fi; url=$(/usr/bin/deskaccess 2>/dev/null | tail -n 1); exec xdg-open "$url"'\'' sh %u#' "$ROOT/build/linux/deskaccess.desktop" \
   > "$deb_root/usr/share/applications/deskaccess.desktop"
 chmod 644 "$deb_root/usr/share/applications/deskaccess.desktop"

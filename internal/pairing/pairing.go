@@ -682,7 +682,13 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 		log.Info("pairing request mapped transport peer to DeskAccess node", "transport_peer", shortPeer(remotePeerID), "node_id", shortPeer(requestPeerID), "transport_backend", transportBackend)
 	}
 	if err := verifyIdentityProof(req.Identity, req.Attestation, "request", requestPeerID, m.n.NodeID(), req.InviteID, req.Proof, nil, req.Mode); err != nil {
-		log.Warn("identity proof rejected", "peer", shortPeer(requestPeerID), "transport_peer", shortPeer(remotePeerID), "err", err)
+		log.Warn("identity proof rejected",
+			"audit_event", "identity_proof_rejected",
+			"peer", shortPeer(requestPeerID),
+			"transport_peer", shortPeer(remotePeerID),
+			"mode", req.Mode,
+			"transport_backend", transportBackend,
+			"err", err)
 		if err := protocol.WriteFrame(s, protocol.MsgPairResponse, protocol.PairResponse{
 			OK: false, Message: "identity proof rejected: " + err.Error(),
 		}); err != nil {
@@ -690,11 +696,26 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 		}
 		return
 	}
+	identityBackend, hardware, vendor, version, rootThumbprint := identityInfoFromAttestation(req.Attestation)
+	log.Info("security audit: identity proof accepted",
+		"audit_event", "identity_proof_accepted",
+		"peer", shortPeer(requestPeerID),
+		"transport_peer", shortPeer(remotePeerID),
+		"mode", req.Mode,
+		"identity_backend", identityBackend,
+		"hardware_backed", hardware,
+		"tpm_vendor", vendor,
+		"tpm_version", version,
+		"transport_backend", transportBackend)
 
 	if req.Mode == "trusted" {
 		trusted, ok := m.cfg.TrustedPeer(requestPeerID)
 		if !ok {
-			log.Warn("trusted reauth rejected — not in trusted list", "peer", shortPeer(requestPeerID))
+			log.Warn("trusted reauth rejected",
+				"audit_event", "trusted_reauth_rejected",
+				"reason", "not_trusted",
+				"peer", shortPeer(requestPeerID),
+				"transport_backend", transportBackend)
 			if err := protocol.WriteFrame(s, protocol.MsgPairResponse, protocol.PairResponse{
 				OK: false, Message: "peer not in trusted list — use an invite link first",
 			}); err != nil {
@@ -703,7 +724,12 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 			return
 		}
 		if err := verifyStoredIdentity(trusted.PublicKey, trusted.MachineID, req.Identity); err != nil {
-			log.Warn("trusted reauth rejected — identity mismatch", "peer", shortPeer(requestPeerID), "err", err)
+			log.Warn("trusted reauth rejected",
+				"audit_event", "trusted_reauth_rejected",
+				"reason", "identity_mismatch",
+				"peer", shortPeer(requestPeerID),
+				"transport_backend", transportBackend,
+				"err", err)
 			if err := protocol.WriteFrame(s, protocol.MsgPairResponse, protocol.PairResponse{
 				OK: false, Message: "trusted identity mismatch — create a fresh invite link",
 			}); err != nil {
@@ -724,11 +750,14 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 			sessionTargetPort = req.TargetPort
 		}
 		log.Info("trusted reauth accepted",
+			"audit_event", "trusted_reauth_authenticated",
 			"peer", shortPeer(requestPeerID),
 			"label", req.Label,
 			"protocol", sessionProtocol,
-			"target_port", sessionTargetPort)
-		backend, hardware, vendor, version, rootThumbprint := identityInfoFromAttestation(req.Attestation)
+			"target_port", sessionTargetPort,
+			"identity_backend", identityBackend,
+			"hardware_backed", hardware,
+			"transport_backend", transportBackend)
 		now := time.Now()
 		m.cfg.AddTrustedPeer(config.TrustedPeer{
 			NodeID:            requestPeerID,
@@ -737,7 +766,7 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 			MachineID:         identityProofMachineID(req.Identity),
 			Protocol:          sessionProtocol,
 			TargetPort:        sessionTargetPort,
-			IdentityBackend:   backend,
+			IdentityBackend:   identityBackend,
 			HardwareBacked:    hardware,
 			TPMVendor:         vendor,
 			TPMVersion:        version,
@@ -749,7 +778,12 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 		// Invite code path
 		inv, err := m.verifyAndConsume(req.InviteID, req.Proof, requestPeerID, req.Mode)
 		if err != nil {
-			log.Warn("invite proof rejected", "err", err, "peer", shortPeer(requestPeerID))
+			log.Warn("invite proof rejected",
+				"audit_event", "invite_proof_rejected",
+				"peer", shortPeer(requestPeerID),
+				"mode", req.Mode,
+				"transport_backend", transportBackend,
+				"err", err)
 			if err := protocol.WriteFrame(s, protocol.MsgPairResponse, protocol.PairResponse{
 				OK: false, Message: err.Error(),
 			}); err != nil {
@@ -760,12 +794,16 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 		sessionTargetPort = inv.effectiveTargetPort()
 		sessionProtocol = rendezvous.ParseProtocol(inv.Protocol).String()
 		log.Info("invite code accepted",
+			"audit_event", "invite_authenticated",
 			"mode", req.Mode,
 			"peer", shortPeer(requestPeerID),
 			"label", req.Label,
 			"invite", inv.ID,
 			"protocol", sessionProtocol,
-			"target_port", sessionTargetPort)
+			"target_port", sessionTargetPort,
+			"identity_backend", identityBackend,
+			"hardware_backed", hardware,
+			"transport_backend", transportBackend)
 
 		// Record who used this invite
 		m.mu.Lock()
@@ -775,7 +813,6 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 		m.mu.Unlock()
 
 		if req.Mode == "pairing" || req.Mode == "onetime" {
-			backend, hardware, vendor, version, rootThumbprint := identityInfoFromAttestation(req.Attestation)
 			now := time.Now()
 			m.cfg.AddTrustedPeer(config.TrustedPeer{
 				NodeID:            requestPeerID,
@@ -784,7 +821,7 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 				MachineID:         identityProofMachineID(req.Identity),
 				Protocol:          sessionProtocol,
 				TargetPort:        sessionTargetPort,
-				IdentityBackend:   backend,
+				IdentityBackend:   identityBackend,
 				HardwareBacked:    hardware,
 				TPMVendor:         vendor,
 				TPMVersion:        version,
@@ -846,6 +883,7 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 		return
 	}
 	log.Info("pairing response sent",
+		"audit_event", "session_token_issued",
 		"peer", shortPeer(requestPeerID),
 		"mode", req.Mode,
 		"transport_backend", transportBackend,
@@ -857,9 +895,19 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 
 func (m *Manager) verifyAndConsume(inviteID []byte, proof []byte, remotePeerID string, mode string) (*invite, error) {
 	if len(inviteID) != rendezvous.InviteIDSize {
+		log.Warn("security audit: invite validation rejected",
+			"audit_event", "invite_validation_rejected",
+			"reason", "invalid_invite_id_length",
+			"peer", shortPeer(remotePeerID),
+			"mode", mode)
 		return nil, fmt.Errorf("invalid link")
 	}
 	if len(proof) != rendezvous.ProofSize {
+		log.Warn("security audit: invite validation rejected",
+			"audit_event", "invite_validation_rejected",
+			"reason", "invalid_proof_length",
+			"peer", shortPeer(remotePeerID),
+			"mode", mode)
 		return nil, fmt.Errorf("invalid invite proof")
 	}
 	m.mu.Lock()
@@ -867,15 +915,37 @@ func (m *Manager) verifyAndConsume(inviteID []byte, proof []byte, remotePeerID s
 
 	inv, ok := m.byInviteID[inviteKey(inviteID)]
 	if !ok {
+		log.Warn("security audit: invite validation rejected",
+			"audit_event", "invite_validation_rejected",
+			"reason", "unknown_invite",
+			"peer", shortPeer(remotePeerID),
+			"mode", mode)
 		return nil, fmt.Errorf("invalid link")
 	}
+	auditArgs := []any{
+		"audit_event", "invite_validation",
+		"invite", inv.ID,
+		"peer", shortPeer(remotePeerID),
+		"mode", mode,
+		"expected_mode", inv.Mode,
+		"protocol", rendezvous.ParseProtocol(inv.Protocol).String(),
+		"target_port", inv.effectiveTargetPort(),
+		"expires_at", inv.ExpiresAt.Format(time.RFC3339),
+	}
 	if subtle.ConstantTimeCompare(inv.InviteID[:], inviteID) != 1 {
+		log.Warn("security audit: invite validation rejected", append(auditArgs, "reason", "invite_id_mismatch")...)
 		return nil, fmt.Errorf("invalid link")
 	}
 	if inv.Revoked {
+		log.Warn("security audit: invite validation rejected", append(auditArgs, "reason", "revoked")...)
 		return nil, fmt.Errorf("link has been revoked")
 	}
 	if inv.Used {
+		log.Warn("security audit: invite validation rejected",
+			append(auditArgs,
+				"reason", "already_used",
+				"used_by", shortPeer(inv.UsedByID),
+				"used_at", inv.UsedAt.Format(time.RFC3339))...)
 		return nil, fmt.Errorf("link already used")
 	}
 	if inv.Mode != "pairing" &&
@@ -883,17 +953,24 @@ func (m *Manager) verifyAndConsume(inviteID []byte, proof []byte, remotePeerID s
 		inv.ExpiresAt.Before(time.Now().Add(99*365*24*time.Hour)) &&
 		time.Now().After(inv.ExpiresAt) {
 		delete(m.byInviteID, inviteKey(inv.InviteID[:]))
+		log.Warn("security audit: invite validation rejected", append(auditArgs, "reason", "expired")...)
 		return nil, fmt.Errorf("link has expired")
 	}
 	if mode != inv.Mode {
+		log.Warn("security audit: invite validation rejected", append(auditArgs, "reason", "mode_mismatch")...)
 		return nil, fmt.Errorf("invite mode mismatch")
 	}
 	if !m.validInviteProofLocked(inv, proof, remotePeerID, mode, time.Now()) {
+		log.Warn("security audit: invite validation rejected", append(auditArgs, "reason", "invalid_hmac_proof")...)
 		return nil, fmt.Errorf("invalid invite proof")
 	}
 
 	inv.Used = true
 	inv.UsedAt = time.Now()
+	log.Info("security audit: invite validation accepted",
+		append(auditArgs,
+			"proof", "hmac_window_match",
+			"marked_used", true)...)
 	return inv, nil
 }
 
@@ -1049,7 +1126,17 @@ func (m *Manager) ConnectByURL(ctx context.Context, rawURL string) (*ConnectResu
 		return nil, fmt.Errorf("host identity proof rejected: %w", err)
 	}
 
-	log.Info("pairing authenticated", "host", resp.HostLabel)
+	identityBackend, hardware, vendor, version, _ := identityInfoFromAttestation(resp.Attestation)
+	log.Info("security audit: host authenticated",
+		"audit_event", "host_authenticated",
+		"peer", shortPeer(peerID),
+		"host", resp.HostLabel,
+		"mode", t.ModeString(),
+		"identity_backend", identityBackend,
+		"hardware_backed", hardware,
+		"tpm_vendor", vendor,
+		"tpm_version", version,
+		"backend", inviteBackend)
 	effectiveIrohTicket := irohTicket
 	if resp.IrohTicket != "" {
 		if err := validateIrohTicket(resp.IrohTicket, t.PubKey[:]); err != nil {
@@ -1063,8 +1150,8 @@ func (m *Manager) ConnectByURL(ctx context.Context, rawURL string) (*ConnectResu
 		targetPort = t.Port()
 	}
 
-	// Pairing mode: store host as a trusted remote
-	if t.Mode == 1 {
+	// Pairing mode: store host as a trusted remote.
+	if t.ModeString() == "pairing" {
 		backend, hardware, vendor, version, rootThumbprint := identityInfoFromAttestation(resp.Attestation)
 		now := time.Now()
 		storedRelayAddrs := m.storableRelayAddrs(relayAddrs)
@@ -1086,8 +1173,11 @@ func (m *Manager) ConnectByURL(ctx context.Context, rawURL string) (*ConnectResu
 			TPMRootThumbprint: rootThumbprint,
 			LastConnectedAt:   now,
 		})
-		m.cfg.Save()
-		log.Info("paired successfully", "host", resp.HostLabel, "peer", peerID[:12])
+		if err := m.cfg.Save(); err != nil {
+			log.Warn("save paired remote failed", "host", resp.HostLabel, "peer", shortPeer(peerID), "err", err)
+			return nil, fmt.Errorf("save paired remote: %w", err)
+		}
+		log.Info("paired successfully", "host", resp.HostLabel, "peer", peerID[:12], "protocol", t.Protocol.String(), "target_port", targetPort)
 	}
 
 	return &ConnectResult{
@@ -1307,9 +1397,20 @@ func (m *Manager) reauthOverStream(ctx context.Context, peerID string, pairingSt
 	if resultTargetPort == 0 {
 		resultTargetPort = rendezvous.ParseProtocol(resultProtocol).DefaultPort()
 	}
+	identityBackend, hardware, vendor, version, rootThumbprint := identityInfoFromAttestation(resp.Attestation)
+	log.Info("security audit: paired host reauthenticated",
+		"audit_event", "host_reauthenticated",
+		"peer", shortPeer(peerID),
+		"host", resp.HostLabel,
+		"protocol", resultProtocol,
+		"target_port", resultTargetPort,
+		"identity_backend", identityBackend,
+		"hardware_backed", hardware,
+		"tpm_vendor", vendor,
+		"tpm_version", version,
+		"backend", networkBackend)
 	savedRemote := false
 	if resp.Identity != nil {
-		identityBackend, hardware, vendor, version, rootThumbprint := identityInfoFromAttestation(resp.Attestation)
 		now := time.Now()
 		storedRelayAddrs := m.storableRelayAddrs(relayAddrs)
 		m.cfg.AddRemote(config.RemoteConfig{
