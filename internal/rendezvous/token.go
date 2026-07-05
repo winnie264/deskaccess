@@ -136,12 +136,14 @@ func DecodeURL(url string) (*Token, error) {
 		return nil, fmt.Errorf("not a DeskAccess URL")
 	}
 	encoded := strings.TrimSpace(strings.TrimPrefix(url, prefix))
+	encoded = strings.TrimLeft(encoded, "/")
 	if beforeQuery, _, ok := strings.Cut(encoded, "?"); ok {
 		encoded = beforeQuery
 	}
 	if beforeFragment, _, ok := strings.Cut(encoded, "#"); ok {
 		encoded = beforeFragment
 	}
+	encoded = strings.Trim(encoded, "/")
 	buf, err := base58Decode(encoded)
 	if err != nil {
 		return nil, fmt.Errorf("decode token: %w", err)

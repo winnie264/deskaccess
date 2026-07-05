@@ -22,7 +22,7 @@ function Register-UrlProtocol {
   )
 
   $base = "HKLM:\Software\Classes\$Scheme"
-  $command = "`"$ExePath`" `"%1`""
+  $command = "`"$ExePath`" --connect `"%1`""
   New-Item -Force -Path $base | Out-Null
   (Get-Item $base).SetValue("", "URL:DeskAccess Invite Link")
   New-ItemProperty -Force -Path $base -Name "URL Protocol" -Value "" -PropertyType String | Out-Null
