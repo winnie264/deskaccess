@@ -163,3 +163,19 @@ func TestTokenDecodeIgnoresQuery(t *testing.T) {
 		t.Fatalf("decode with query: %v", err)
 	}
 }
+
+func TestTokenDecodeIgnoresSlashBeforeQuery(t *testing.T) {
+	tok := &rendezvous.Token{ExpiresAt: time.Now().Add(time.Hour)}
+	url := tok.Encode() + "/?backend=iroh&iroh_ticket=iroh-sidecar-v1%3Aabc&v=1"
+	if _, err := rendezvous.DecodeURL(url); err != nil {
+		t.Fatalf("decode with slash before query: %v", err)
+	}
+}
+
+func TestTokenDecodeIgnoresExtraSlashAfterScheme(t *testing.T) {
+	tok := &rendezvous.Token{ExpiresAt: time.Now().Add(time.Hour)}
+	url := "deskaccess:///" + tok.Encode()[len(rendezvous.URLScheme+"://"):]
+	if _, err := rendezvous.DecodeURL(url); err != nil {
+		t.Fatalf("decode with extra slash after scheme: %v", err)
+	}
+}

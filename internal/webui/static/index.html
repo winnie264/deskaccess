@@ -259,7 +259,9 @@
       <div class="url-row">
         <input id="url-input" type="text"
                placeholder="deskaccess://3mFgK9xQr2Pz…"
-               autocomplete="off" spellcheck="false">
+               autocomplete="off" spellcheck="false"
+               onkeydown="if(event.key==='Enter')doConnect()">
+        <button class="btn btn-secondary" onclick="pasteInviteFromClipboard()">Paste</button>
         <button class="btn btn-primary" onclick="doConnect()">Connect</button>
       </div>
     </div>
@@ -1454,8 +1456,39 @@ function closeModal() {
 }
 
 // ── Connect ───────────────────────────────────────────────────────────────────
+function extractDeskAccessURL(text) {
+  text = String(text || '').trim();
+  if (!text) return '';
+  const match = text.match(/deskaccess:\/\/[^\s<>"']+/i);
+  return match ? match[0] : text;
+}
+
+async function pasteInviteFromClipboard() {
+  const input = document.getElementById('url-input');
+  if (!navigator.clipboard || !navigator.clipboard.readText) {
+    input.focus();
+    showToast('Clipboard paste is not available here. Press Ctrl+V.', true);
+    return;
+  }
+  try {
+    const text = await navigator.clipboard.readText();
+    const url = extractDeskAccessURL(text);
+    if (!url) {
+      input.focus();
+      showToast('Clipboard is empty', true);
+      return;
+    }
+    input.value = url;
+    input.focus();
+    showToast('Link pasted');
+  } catch (e) {
+    input.focus();
+    showToast('Clipboard permission blocked. Press Ctrl+V.', true);
+  }
+}
+
 async function doConnect() {
-  const url = document.getElementById('url-input').value.trim();
+  const url = extractDeskAccessURL(document.getElementById('url-input').value);
   if (!url) { showToast('Paste a link first', true); return; }
   showToast('Starting connection…');
   const stopPolling = pollToastConnectStatusByURL(url);
@@ -1481,6 +1514,29 @@ async function doConnect() {
   } finally {
     stopPolling();
   }
+}
+
+function handleStartupConnectParam() {
+  const params = new URLSearchParams(window.location.search);
+  const encoded = params.get('connect_b64');
+  if (!encoded) return;
+  let raw = '';
+  try {
+    let b64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+    b64 += '='.repeat((4 - (b64.length % 4)) % 4);
+    raw = atob(b64);
+  } catch (e) {
+    return;
+  }
+  const url = extractDeskAccessURL(raw);
+  if (!url) return;
+  params.delete('connect_b64');
+  const next = window.location.pathname + (params.toString() ? '?' + params.toString() : '') + window.location.hash;
+  window.history.replaceState({}, '', next);
+  switchTab('connect');
+  document.getElementById('url-input').value = url;
+  showToast('Opening invite link…');
+  setTimeout(doConnect, 250);
 }
 
 async function connectPaired(nodeId) {
@@ -2111,6 +2167,7 @@ loadInvites();
 loadAllowed();
 loadConfig();
 scanPorts('rdp');
+handleStartupConnectParam();
 setInterval(loadStatus, 10000);
 setInterval(() => {
   loadActiveConnections();

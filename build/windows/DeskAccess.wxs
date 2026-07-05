@@ -75,7 +75,7 @@
           <RegistryValue Type="string" Value="[#DeskAccessExe],0" />
         </RegistryKey>
         <RegistryKey Root="HKCR" Key="deskaccess\shell\open\command">
-          <RegistryValue Type="string" Value="&quot;[#DeskAccessExe]&quot; &quot;%1&quot;" />
+          <RegistryValue Type="string" Value="&quot;[#DeskAccessExe]&quot; --connect &quot;%1&quot;" />
         </RegistryKey>
       </Component>
     </DirectoryRef>

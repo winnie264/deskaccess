@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -94,8 +96,7 @@ func main() {
 		openDashboardFromServiceOrExit()
 
 	case *connectURL != "":
-		// Client mode: connect to remote via invite URL
-		runClient(*connectURL)
+		openInviteFromProtocolHandler(*connectURL)
 
 	case *generate:
 		generateInvite(*protocol, *port, *label)
@@ -226,6 +227,33 @@ func openDashboardFromServiceOrExit() {
 	log.Fatalf("service not reachable: %v", lastErr)
 }
 
+func openInviteFromProtocolHandler(rawURL string) {
+	if st, err := ipc.Query(ipc.Request{Cmd: "status"}); err == nil && st != nil && st.WebuiURL != "" {
+		dashboardURL := dashboardURLWithConnect(st.WebuiURL, rawURL)
+		if tray.HasDesktopDisplay() {
+			tray.ShowDashboard(dashboardURL)
+		} else {
+			fmt.Println(dashboardURL)
+		}
+		return
+	}
+
+	// Fallback for portable/manual client use when no service or standalone
+	// backend is reachable over IPC.
+	runClient(rawURL)
+}
+
+func dashboardURLWithConnect(baseURL string, rawInviteURL string) string {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return baseURL
+	}
+	q := u.Query()
+	q.Set("connect_b64", base64.RawURLEncoding.EncodeToString([]byte(rawInviteURL)))
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 // runTray is the tray process. It connects to the daemon via IPC.
 // If no daemon is reachable (e.g. during debugging), it starts the daemon
 // stack in-process as background goroutines so a single `go run` is enough.
@@ -310,10 +338,16 @@ func runStandalone() {
 		log.Fatal("standalone backend did not return a dashboard URL")
 	}
 	fmt.Println(st.WebuiURL)
-	if tray.HasDesktopDisplay() {
+	if tray.HasDisplay() {
+		t := tray.New(ctx)
+		t.Run()
+		cancel()
+	} else if tray.HasDesktopDisplay() {
 		tray.ShowDashboard(st.WebuiURL)
+		cancel()
+	} else {
+		<-ctx.Done()
 	}
-	<-ctx.Done()
 	waitForStackShutdown(stackDone)
 }
 
