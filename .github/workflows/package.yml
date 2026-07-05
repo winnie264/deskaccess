@@ -48,23 +48,23 @@ jobs:
           dotnet tool install --global wix --version 6.*
           "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append
 
-      - name: Build Windows ZIP package
-        shell: pwsh
-        run: |
-          ./build/package.ps1 -Version "${{ steps.version.outputs.version }}"
-
       - name: Build Windows MSI package
         shell: pwsh
         run: |
           ./build/package-msi.ps1 -Version "${{ steps.version.outputs.version }}"
+
+      - name: Build Windows portable package
+        shell: pwsh
+        run: |
+          ./build/package-standalone-windows.ps1 -Version "${{ steps.version.outputs.version }}"
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
           name: DeskAccess-windows-amd64
           path: |
-            dist/packages/DeskAccess-${{ steps.version.outputs.version }}-windows-amd64.zip
             dist/packages/DeskAccess-${{ steps.version.outputs.version }}-windows-amd64.msi
+            dist/packages/DeskAccess-${{ steps.version.outputs.version }}-windows-amd64-portable.zip
             dist/packages/SHA256SUMS.txt
           if-no-files-found: error
 
