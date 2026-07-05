@@ -1,0 +1,21 @@
+title: DeskAccess
+description: App-scoped remote access for RDP, SSH, VNC, and selected TCP services.
+url: https://winnie264.github.io
+baseurl: /deskaccess
+lang: en
+timezone: Asia/Kolkata
+exclude:
+  - .github/
+  - .gocache/
+  - .gocache-codex/
+  - .gomodcache-codex/
+  - .tmp-build/
+  - android/
+  - build/
+  - cmd/
+  - dist/
+  - internal/
+  - sidecars/
+  - go.mod
+  - go.sum
+  - deskaccess.exe

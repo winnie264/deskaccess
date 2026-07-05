@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DeskAccess - Open-source remote access alternative for RDP, SSH, and VNC</title>
+  <meta name="description" content="DeskAccess is an open-source, passwordless remote access alternative using machine certificates and optional TPM-backed hardware identity for selected RDP, SSH, VNC, and TCP services.">
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+  <meta name="googlebot" content="index, follow">
+  <meta name="bingbot" content="index, follow">
+  <link rel="canonical" href="https://winnie264.github.io/deskaccess/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="DeskAccess">
+  <meta property="og:title" content="DeskAccess - Open-source remote access alternative">
+  <meta property="og:description" content="A passwordless, certificate-based alternative to full VPN and remote desktop tools for reaching selected RDP, SSH, VNC, and TCP services.">
+  <meta property="og:url" content="https://winnie264.github.io/deskaccess/">
+  <meta property="og:image" content="https://raw.githubusercontent.com/winnie264/deskaccess/main/resources/deskview-256.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "DeskAccess",
+    "applicationCategory": "RemoteAccessApplication",
+    "operatingSystem": "Windows, Linux, Raspberry Pi",
+    "description": "Open-source passwordless remote access alternative using machine certificates and optional TPM-backed hardware identity for selected RDP, SSH, VNC, and TCP services.",
+    "url": "https://winnie264.github.io/deskaccess/",
+    "codeRepository": "https://github.com/winnie264/deskaccess"
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      {
+        "@type": "Question",
+        "name": "Is DeskAccess an alternative to TeamViewer, AnyDesk, RustDesk, Tailscale, or ZeroTier?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "DeskAccess can be used as an open-source alternative for scoped remote access workflows. It focuses on reaching selected services such as RDP, SSH, VNC, or a custom TCP port instead of exposing a full private network or replacing every feature of a full remote desktop suite."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How is DeskAccess different from a VPN?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "DeskAccess is app-scoped. It creates access to a selected service on a selected machine, while a traditional VPN often gives broader network reach."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Does DeskAccess use passwords for remote access authentication?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "DeskAccess is passwordless at the DeskAccess layer. Peers authenticate with machine certificates during pairing and connection instead of sharing a DeskAccess password."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How does DeskAccess use TPM hardware security?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Where supported, DeskAccess can use TPM-backed identity so the machine certificate is tied to hardware-backed key material. This helps prove that a paired machine is the same trusted device during later connections."
+        }
+      }
+    ]
+  }
+  </script>
+  <style>
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f7f9fb;
+      color: #14202e;
+      line-height: 1.6;
+    }
+    .wrap { width: min(1040px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 40px; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+    a { color: #115e59; }
+    nav { display: flex; gap: 16px; flex-wrap: wrap; }
+    nav a { text-decoration: none; color: #526173; }
+    h1 { margin: 64px 0 16px; font-size: clamp(40px, 7vw, 72px); line-height: 1.02; letter-spacing: 0; }
+    .lead { max-width: 760px; color: #526173; font-size: 20px; }
+    .actions { display: flex; gap: 12px; flex-wrap: wrap; margin: 28px 0; }
+    .button { padding: 11px 18px; border-radius: 6px; background: #0f766e; color: #fff; text-decoration: none; font-weight: 700; }
+    .button.secondary { background: transparent; color: #115e59; border: 1px solid #0f766e; }
+    img { max-width: 100%; height: auto; border-radius: 8px; border: 1px solid #d9e1ea; background: #fff; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 28px; }
+    .item { background: #fff; border: 1px solid #d9e1ea; border-radius: 8px; padding: 18px; }
+    .item h2 { margin: 0 0 8px; font-size: 18px; }
+    .item p { margin: 0; color: #526173; }
+    footer { margin-top: 34px; color: #526173; font-size: 14px; }
+    @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <strong>DeskAccess</strong>
+      <nav aria-label="Primary navigation">
+        <a href="https://github.com/winnie264/deskaccess">GitHub</a>
+        <a href="https://github.com/winnie264/deskaccess/releases">Releases</a>
+      </nav>
+    </header>
+    <main>
+      <h1>DeskAccess</h1>
+      <p class="lead">An open-source, passwordless remote access alternative for RDP, SSH, VNC, and selected TCP services, using machine certificates and optional TPM-backed hardware identity without opening access to the whole private network.</p>
+      <div class="actions">
+        <a class="button" href="https://github.com/winnie264/deskaccess/releases">Download releases</a>
+        <a class="button secondary" href="https://github.com/winnie264/deskaccess">View source</a>
+      </div>
+      <img src="demo.gif" alt="DeskAccess invite, connect, and RDP launch demo">
+      <div class="grid">
+        <article class="item">
+          <h2>Selected services only</h2>
+          <p>Share RDP, SSH, VNC, or a custom TCP port without exposing an entire subnet.</p>
+        </article>
+        <article class="item">
+          <h2>Invite and pairing links</h2>
+          <p>Create temporary links or persistent paired access for trusted admin devices.</p>
+        </article>
+        <article class="item">
+          <h2>Encrypted transport</h2>
+          <p>Service data is carried over encrypted peer connections between DeskAccess endpoints.</p>
+        </article>
+      </div>
+      <section aria-labelledby="alternative-title">
+        <h2 id="alternative-title">Alternative to broad remote access tools</h2>
+        <p class="lead">DeskAccess is built for people comparing VPN and remote desktop products who want a narrower model: access to one selected service instead of a whole private network.</p>
+        <div class="grid">
+          <article class="item">
+            <h2>VPN alternative</h2>
+            <p>Use DeskAccess when you need RDP, SSH, VNC, or TCP access without broad subnet routing.</p>
+          </article>
+          <article class="item">
+            <h2>Remote desktop alternative</h2>
+            <p>DeskAccess can launch existing RDP and VNC clients through a secure tunnel.</p>
+          </article>
+          <article class="item">
+            <h2>Self-hostable alternative</h2>
+            <p>Run your own relay infrastructure when you want control over availability and policy.</p>
+          </article>
+        </div>
+        <p class="lead">People comparing TeamViewer, AnyDesk, RustDesk, Chrome Remote Desktop, Tailscale, ZeroTier, or traditional VPNs may choose DeskAccess for service-scoped remote access.</p>
+      </section>
+      <section aria-labelledby="security-title">
+        <h2 id="security-title">Hardware-backed, passwordless authentication</h2>
+        <p class="lead">DeskAccess uses passwordless authentication at the DeskAccess layer. During pairing and reconnect, endpoints prove machine identity with certificates instead of relying on a shared DeskAccess password.</p>
+        <div class="grid">
+          <article class="item">
+            <h2>TPM-backed certificates</h2>
+            <p>Where supported, DeskAccess can bind machine identity to TPM-backed key material so trusted access is tied to the hardware device.</p>
+          </article>
+          <article class="item">
+            <h2>Passwordless pairing</h2>
+            <p>Pairing links establish trust between machines. Later connections authenticate with certificates, not a DeskAccess account password.</p>
+          </article>
+          <article class="item">
+            <h2>Software fallback</h2>
+            <p>On systems without TPM support, DeskAccess can fall back to software identity while keeping the same certificate-based authentication model.</p>
+          </article>
+        </div>
+      </section>
+    </main>
+    <footer>Source code and releases are available on <a href="https://github.com/winnie264/deskaccess">GitHub</a>.</footer>
+  </div>
+</body>
+</html>

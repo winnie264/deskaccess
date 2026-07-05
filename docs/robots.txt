@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://winnie264.github.io/deskaccess/sitemap.xml
