@@ -1,5 +1,6 @@
 # Build outputs and packaged artifacts
 dist/
+.tmp-build/
 build/*.exe
 build/*.dll
 build/*.so
@@ -18,6 +19,7 @@ build/deskaccess-*
 build/rdpanywhere-*
 build/DeskAccess.exe
 build/*.exe~
+/deskaccess.exe
 cmd/deskaccess/__debug_bin*
 sidecars/**/target/
 
@@ -25,6 +27,7 @@ sidecars/**/target/
 .cache/
 .gocache/
 .gocache*/
+.gomodcache*/
 go-build*/
 *.test
 *.out
@@ -58,6 +61,7 @@ config.toml
 *.pid
 
 # IDE/editor
+.claude/
 .vscode/
 .idea/
 *.code-workspace
