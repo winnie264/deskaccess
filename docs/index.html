@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DeskAccess - Open-source remote access alternative for RDP, SSH, and VNC</title>
-  <meta name="description" content="DeskAccess is an open-source, passwordless remote access alternative using machine certificates and optional TPM-backed hardware identity for selected RDP, SSH, VNC, and TCP services.">
+  <title>DeskAccess - TPM-authenticated access control for RDP, SSH, and VNC</title>
+  <meta name="description" content="DeskAccess helps system administrators replace exposed RDP access with passwordless, certificate-based access control using machine certificates and optional TPM-backed hardware identity.">
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
   <meta name="googlebot" content="index, follow">
   <meta name="bingbot" content="index, follow">
@@ -13,8 +13,8 @@
   <link rel="canonical" href="https://winnie264.github.io/deskaccess/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="DeskAccess">
-  <meta property="og:title" content="DeskAccess - Open-source remote access alternative">
-  <meta property="og:description" content="A passwordless, certificate-based alternative to full VPN and remote desktop tools for reaching selected RDP, SSH, VNC, and TCP services.">
+  <meta property="og:title" content="DeskAccess - TPM-authenticated access control for RDP">
+  <meta property="og:description" content="Replace exposed RDP access with scoped, passwordless machine-certificate authentication and optional TPM-backed device identity.">
   <meta property="og:url" content="https://winnie264.github.io/deskaccess/">
   <meta property="og:image" content="https://raw.githubusercontent.com/winnie264/deskaccess/main/resources/deskview-256.png">
   <meta name="twitter:card" content="summary_large_image">
@@ -25,7 +25,7 @@
     "name": "DeskAccess",
     "applicationCategory": "RemoteAccessApplication",
     "operatingSystem": "Windows, Linux, Raspberry Pi",
-    "description": "Open-source passwordless remote access alternative using machine certificates and optional TPM-backed hardware identity for selected RDP, SSH, VNC, and TCP services.",
+    "description": "Open-source passwordless access control for selected RDP, SSH, VNC, and TCP services using machine certificates and optional TPM-backed hardware identity.",
     "url": "https://winnie264.github.io/deskaccess/",
     "codeRepository": "https://github.com/winnie264/deskaccess"
   }
@@ -65,6 +65,14 @@
         "acceptedAnswer": {
           "@type": "Answer",
           "text": "Where supported, DeskAccess can use TPM-backed identity so the machine certificate is tied to hardware-backed key material. This helps prove that a paired machine is the same trusted device during later connections."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Can DeskAccess replace exposed RDP access for administrators?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "DeskAccess is designed to let administrators keep RDP private and reachable only through a scoped DeskAccess tunnel. Access is granted to authenticated machines using certificates, with TPM-backed identity where supported."
         }
       }
     ]
@@ -108,7 +116,7 @@
     </header>
     <main>
       <h1>DeskAccess</h1>
-      <p class="lead">An open-source, passwordless remote access alternative for RDP, SSH, VNC, and selected TCP services, using machine certificates and optional TPM-backed hardware identity without opening access to the whole private network.</p>
+      <p class="lead">TPM-aware, passwordless access control for RDP, SSH, VNC, and selected TCP services. Keep RDP private, then allow access only from authenticated machines using certificates and optional TPM-backed hardware identity.</p>
       <div class="actions">
         <a class="button" href="https://github.com/winnie264/deskaccess/releases">Download releases</a>
         <a class="button secondary" href="https://github.com/winnie264/deskaccess">View source</a>
@@ -128,6 +136,24 @@
           <p>Service data is carried over encrypted peer connections between DeskAccess endpoints.</p>
         </article>
       </div>
+      <section aria-labelledby="admins-title">
+        <h2 id="admins-title">Built for system administrators</h2>
+        <p class="lead">DeskAccess is for teams that want to stop exposing RDP directly and avoid broad VPN access. Administrators can keep RDP bound to a private or loopback address and require DeskAccess authentication before any client reaches it.</p>
+        <div class="grid">
+          <article class="item">
+            <h2>Replace exposed RDP entry points</h2>
+            <p>Use DeskAccess as the controlled access path to RDP instead of opening port 3389 to a LAN, VPN subnet, or the public internet.</p>
+          </article>
+          <article class="item">
+            <h2>TPM-backed device trust</h2>
+            <p>Where TPM support is available, trusted access can be tied to hardware-backed key material so only the paired machine identity can reconnect.</p>
+          </article>
+          <article class="item">
+            <h2>Certificate-based access</h2>
+            <p>Pairing and reconnects use machine certificates at the DeskAccess layer, reducing dependence on shared remote-access passwords.</p>
+          </article>
+        </div>
+      </section>
       <section aria-labelledby="alternative-title">
         <h2 id="alternative-title">Alternative to broad remote access tools</h2>
         <p class="lead">DeskAccess is built for people comparing VPN and remote desktop products who want a narrower model: access to one selected service instead of a whole private network.</p>
@@ -152,6 +178,10 @@
         <p class="lead">DeskAccess uses passwordless authentication at the DeskAccess layer. During pairing and reconnect, endpoints prove machine identity with certificates instead of relying on a shared DeskAccess password.</p>
         <div class="grid">
           <article class="item">
+            <h2>Private RDP by default</h2>
+            <p>RDP can remain reachable only locally on the host while DeskAccess handles the authenticated remote access path.</p>
+          </article>
+          <article class="item">
             <h2>TPM-backed certificates</h2>
             <p>Where supported, DeskAccess can bind machine identity to TPM-backed key material so trusted access is tied to the hardware device.</p>
           </article>
@@ -166,7 +196,7 @@
         </div>
       </section>
     </main>
-    <footer>Source code and releases are available on <a href="https://github.com/winnie264/deskaccess">GitHub</a>.</footer>
+    <footer>Source code and releases are available on <a href="https://github.com/winnie264/deskaccess">GitHub</a>. For support-related queries, email <a href="mailto:support@deskaccess.dev">support@deskaccess.dev</a>.</footer>
   </div>
 </body>
 </html>

@@ -160,16 +160,6 @@ Windows MSI packaging can be built with:
 build\package-msi.ps1
 ```
 
-## Relay Server
-
-The repository includes a basic relay server under:
-
-```text
-cmd/relay-server
-```
-
-A self-hosted relay is the recommended option for dependable access. Public relay servers may work, but they should not be treated as guaranteed infrastructure.
-
 ## Status
 
 DeskAccess is under active development. Interfaces, protocols, and packaging may change as the project matures.
