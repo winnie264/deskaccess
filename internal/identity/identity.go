@@ -3,8 +3,8 @@
 // Two backends:
 //
 //  1. TPM (hardware) — key generated in TPM, never extractable.
-//     Provides a certificate chain: App Key ← EK ← Manufacturer CA.
-//     Other peers can verify the key is hardware-bound.
+//     Pairing verifies possession of the TPM-backed key material and pins the
+//     attestation-key thumbprint as the machine identity.
 //
 //  2. Software (fallback) — ed25519 key in config file.
 //     Used when no TPM is present (VMs, older hardware, Raspberry Pi
@@ -17,8 +17,9 @@
 // TPM key type: ECDSA P-256 (universally supported by TPM 2.0).
 // Software key type: ed25519 (current default).
 //
-// When TPM is available the PairRequest includes an AttestationBundle
-// so the other peer can verify hardware binding.
+// When TPM is available the PairRequest includes an AttestationBundle so the
+// other peer can verify proof signatures against the attestation key. This is
+// machine identity key proof, not full manufacturer-chain attestation.
 package identity
 
 import (
@@ -59,8 +60,8 @@ type Identity struct {
 	Attestation *AttestationBundle
 }
 
-// AttestationBundle carries everything needed for the remote peer to verify
-// that this identity key was generated inside a real TPM.
+// AttestationBundle carries the TPM certificate material associated with the
+// identity key.
 type AttestationBundle struct {
 	// AKCert is the Attestation Key certificate, DER-encoded.
 	// Signed by the EK (or by a Privacy CA in enterprise setups).

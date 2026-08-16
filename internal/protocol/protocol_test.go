@@ -5,21 +5,24 @@ import (
 	"testing"
 )
 
-func TestSessionTokenCanBeVerifiedMultipleTimesBeforeExpiry(t *testing.T) {
+func TestSessionTokenAllowsBoundedMultipleUses(t *testing.T) {
 	store := NewSessionStore()
 	token, err := store.Issue("peer-a", 3389)
 	if err != nil {
 		t.Fatalf("Issue() error = %v", err)
 	}
 
-	for i := 0; i < 2; i++ {
+	for i := 0; i < SessionTokenMaxUses; i++ {
 		peerID, err := store.Verify(token)
 		if err != nil {
-			t.Fatalf("Verify(%d) error = %v", i, err)
+			t.Fatalf("Verify use %d error = %v", i+1, err)
 		}
 		if peerID != "peer-a" {
-			t.Fatalf("Verify(%d) peer = %q, want peer-a", i, peerID)
+			t.Fatalf("Verify use %d peer = %q, want peer-a", i+1, peerID)
 		}
+	}
+	if _, err := store.Verify(token); err == nil {
+		t.Fatal("Verify after use limit unexpectedly succeeded")
 	}
 }
 

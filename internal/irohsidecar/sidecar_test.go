@@ -2,6 +2,7 @@ package irohsidecar
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ func TestBackendTicketAndOpenTunnelUseSidecarHTTP(t *testing.T) {
 	var handlersRegistered atomic.Bool
 	var openedKind string
 	var openedTicket string
+	ticketValue := testTicket(t, "ep-1")
 
 	streamLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -46,7 +48,7 @@ func TestBackendTicketAndOpenTunnelUseSidecarHTTP(t *testing.T) {
 		case "/status":
 			_ = json.NewEncoder(w).Encode(statusResponse{Running: true, Ready: true, EndpointID: "ep-1"})
 		case "/ticket":
-			_ = json.NewEncoder(w).Encode(ticketResponse{Ticket: TicketPrefix + "ticket-1", EndpointID: "ep-1"})
+			_ = json.NewEncoder(w).Encode(ticketResponse{Ticket: ticketValue, EndpointID: "ep-1"})
 		case "/open":
 			var req openRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -75,15 +77,15 @@ func TestBackendTicketAndOpenTunnelUseSidecarHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TicketContext: %v", err)
 	}
-	if ticket != TicketPrefix+"ticket-1" {
-		t.Fatalf("ticket = %q, want %sticket-1", ticket, TicketPrefix)
+	if ticket != ticketValue {
+		t.Fatalf("ticket = %q, want %s", ticket, ticketValue)
 	}
 	stream, err := backend.OpenTunnel(context.Background(), ticket)
 	if err != nil {
 		t.Fatalf("OpenTunnel: %v", err)
 	}
 	defer stream.Close()
-	if openedKind != "tunnel" || openedTicket != TicketPrefix+"ticket-1" {
+	if openedKind != "tunnel" || openedTicket != ticketValue {
 		t.Fatalf("open request kind/ticket = %q/%q", openedKind, openedTicket)
 	}
 	data, err := io.ReadAll(io.LimitReader(stream, 5))
@@ -216,7 +218,7 @@ func TestBackendOpenRestartsStoppedSidecar(t *testing.T) {
 		return nil
 	}
 
-	stream, err := backend.OpenTunnel(context.Background(), TicketPrefix+"ticket")
+	stream, err := backend.OpenTunnel(context.Background(), testTicket(t, "ep-restarted"))
 	if err != nil {
 		t.Fatalf("OpenTunnel: %v", err)
 	}
@@ -236,6 +238,18 @@ func closedErrorChan() chan error {
 	ch := make(chan error)
 	close(ch)
 	return ch
+}
+
+func testTicket(t *testing.T, endpointID string) string {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{
+		"id":    endpointID,
+		"addrs": []map[string]string{{"Relay": "https://relay.example./"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal ticket: %v", err)
+	}
+	return TicketPrefix + base64.RawURLEncoding.EncodeToString(data)
 }
 
 func TestBackendCallbackDispatchesIncomingTunnel(t *testing.T) {

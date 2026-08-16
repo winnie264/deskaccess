@@ -5,7 +5,7 @@
 # packages from your distro if you build the GUI-capable app.
 set -euo pipefail
 
-VERSION="${1:-0.1.0}"
+VERSION="${1:-0.1.1}"
 TARGET="${TARGET:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${ROOT}/dist"

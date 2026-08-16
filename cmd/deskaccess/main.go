@@ -65,7 +65,7 @@ func main() {
 	}
 	logger.ConfigureLibp2pLogs(*debug)
 	slog.Info("DeskAccess starting",
-		"version", "0.1.0",
+		"version", "0.1.1",
 		"debug", *debug,
 		"log_file", logger.CurrentLogFile(),
 	)
@@ -99,6 +99,9 @@ func main() {
 		openInviteFromProtocolHandler(*connectURL)
 
 	case *generate:
+		if err := requireInviteGeneratePrivilege(); err != nil {
+			log.Fatal(err)
+		}
 		generateInvite(*protocol, *port, *label)
 
 	case *showID:

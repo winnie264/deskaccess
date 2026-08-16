@@ -93,17 +93,17 @@ Self-hosted relay servers are recommended when reliability matters. With your ow
 DeskAccess is designed around scoped access:
 
 - Only selected apps/services are exposed.
-- Access is passwordless at the DeskAccess layer: connections are secured by machine certificates instead of shared passwords.
+- Access is passwordless at the DeskAccess layer: connections are secured by machine identity proofs instead of shared passwords.
 - Invites can be temporary or persistent pairing links.
 - Pairing can add a trusted machine to the allowed list.
 - The host verifies the requested loopback target and port.
-- TPM-backed identity and hardware machine ID can be used where available, with software identity fallback.
+- TPM-backed identity keys can be used where available, with software identity fallback.
 
 ### End-to-End Encryption
 
 DeskAccess sends RDP, SSH, VNC, and custom TCP data over encrypted connections between the two DeskAccess endpoints. Intermediate relay, discovery, DHT, DNS, or bootstrap servers can help peers find each other or forward encrypted traffic, but they are not given the plaintext service data.
 
-Each DeskAccess endpoint proves its identity with certificates during pairing and connection. When hardware-backed identity is available, the certificate is tied to the machine hardware ID; otherwise DeskAccess falls back to a software identity.
+Each DeskAccess endpoint proves its identity during pairing and connection. When TPM support is available, DeskAccess can use a hardware-backed identity key; otherwise it falls back to a software identity. Current TPM support is used as a machine identity key, not as full TPM manufacturer-chain attestation or device-health verification.
 
 Backend behavior:
 
@@ -140,13 +140,13 @@ Raspberry Pi 5 / 64-bit Raspberry Pi OS:
 $env:GOOS='linux'
 $env:GOARCH='arm64'
 $env:CGO_ENABLED='0'
-go build -ldflags='-s -w -X main.version=0.1.0-pi' -o build\deskaccess-linux-arm64 ./cmd/deskaccess
+go build -ldflags='-s -w -X main.version=0.1.1-pi' -o build\deskaccess-linux-arm64 ./cmd/deskaccess
 ```
 
 Package names:
 
-- `deskaccess-0.1.0-raspberry-pi-5-arm64.deb` for Raspberry Pi 5 and other Raspberry Pi boards running 64-bit Raspberry Pi OS.
-- `deskaccess-0.1.0-raspberry-pi-32bit-armv7.deb` for older 32-bit Raspberry Pi OS installs.
+- `deskaccess-0.1.1-raspberry-pi-5-arm64.deb` for Raspberry Pi 5 and other Raspberry Pi boards running 64-bit Raspberry Pi OS.
+- `deskaccess-0.1.1-raspberry-pi-32bit-armv7.deb` for older 32-bit Raspberry Pi OS installs.
 
 Linux packages can be built with:
 

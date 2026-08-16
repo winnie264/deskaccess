@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DeskAccess - TPM-authenticated access control for RDP, SSH, and VNC</title>
-  <meta name="description" content="DeskAccess helps system administrators replace exposed RDP access with passwordless, certificate-based access control using machine certificates and optional TPM-backed hardware identity.">
+  <title>DeskAccess - Hardware-backed identity for RDP, SSH, and VNC access</title>
+  <meta name="description" content="DeskAccess helps system administrators replace exposed RDP access with passwordless, machine-identity access control and optional TPM-backed identity keys.">
   <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
   <meta name="googlebot" content="index, follow">
   <meta name="bingbot" content="index, follow">
   <meta name="google-site-verification" content="aF4leFiwfy-qzYbCKvbQN3sI09Ssy54DsWnzHFFiUTU">
   <meta name="msvalidate.01" content="A3E989AD8C894499FFE1CE1F4DB55032">
-  <meta name="keywords" content="DeskAccess, remote access alternative, passwordless remote access, TPM authentication, hardware backed certificates, machine certificates, open source remote desktop, RDP alternative, VNC alternative, SSH tunnel, Raspberry Pi remote access, app scoped VPN, secure tunnel, iroh, TeamViewer alternative, AnyDesk alternative, Tailscale alternative, ZeroTier alternative, RustDesk alternative">
+  <meta name="keywords" content="DeskAccess, remote access alternative, passwordless remote access, TPM-backed identity, hardware-backed identity keys, machine identity, open source remote desktop, RDP alternative, VNC alternative, SSH tunnel, Raspberry Pi remote access, app scoped VPN, secure tunnel, iroh, TeamViewer alternative, AnyDesk alternative, Tailscale alternative, ZeroTier alternative, RustDesk alternative">
   <meta name="author" content="DeskAccess">
   <link rel="canonical" href="https://winnie264.github.io/deskaccess/">
   <link rel="icon" href="resources/deskview-256.png">
@@ -18,13 +18,13 @@
   <link rel="manifest" href="site.webmanifest">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="DeskAccess">
-  <meta property="og:title" content="DeskAccess - TPM-authenticated access control for RDP">
-  <meta property="og:description" content="Replace exposed RDP access with scoped, passwordless machine-certificate authentication and optional TPM-backed device identity.">
+  <meta property="og:title" content="DeskAccess - Hardware-backed identity for RDP access">
+  <meta property="og:description" content="Replace exposed RDP access with scoped, passwordless machine identity and optional TPM-backed identity keys.">
   <meta property="og:url" content="https://winnie264.github.io/deskaccess/">
   <meta property="og:image" content="https://winnie264.github.io/deskaccess/resources/deskview-256.png">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="DeskAccess - TPM-authenticated access control for RDP">
-  <meta name="twitter:description" content="Replace exposed RDP access with scoped, passwordless machine-certificate authentication and optional TPM-backed device identity.">
+  <meta name="twitter:title" content="DeskAccess - Hardware-backed identity for RDP access">
+  <meta name="twitter:description" content="Replace exposed RDP access with scoped, passwordless machine identity and optional TPM-backed identity keys.">
   <meta name="twitter:image" content="https://winnie264.github.io/deskaccess/resources/deskview-256.png">
   <script type="application/ld+json">
   {
@@ -33,7 +33,7 @@
     "name": "DeskAccess",
     "applicationCategory": "RemoteAccessApplication",
     "operatingSystem": "Windows, Linux, Raspberry Pi",
-    "description": "Open-source passwordless access control for selected RDP, SSH, VNC, and TCP services using machine certificates and optional TPM-backed hardware identity.",
+    "description": "Open-source passwordless access control for selected RDP, SSH, VNC, and TCP services using machine identity and optional TPM-backed identity keys.",
     "url": "https://winnie264.github.io/deskaccess/",
     "codeRepository": "https://github.com/winnie264/deskaccess",
     "image": "https://winnie264.github.io/deskaccess/resources/deskview-256.png",
@@ -70,7 +70,7 @@
         "name": "Does DeskAccess use passwords for remote access authentication?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "DeskAccess is passwordless at the DeskAccess layer. Peers authenticate with machine certificates during pairing and connection instead of sharing a DeskAccess password."
+          "text": "DeskAccess is passwordless at the DeskAccess layer. Peers authenticate with machine identity proofs during pairing and connection instead of sharing a DeskAccess password."
         }
       },
       {
@@ -78,7 +78,7 @@
         "name": "How does DeskAccess use TPM hardware security?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "Where supported, DeskAccess can use TPM-backed identity so the machine certificate is tied to hardware-backed key material. This helps prove that a paired machine is the same trusted device during later connections."
+          "text": "Where supported, DeskAccess can use a TPM-backed identity key so later connections must prove possession of hardware-backed key material. Current TPM support is machine identity, not full manufacturer-chain attestation or device-health verification."
         }
       },
       {
@@ -86,7 +86,7 @@
         "name": "Can DeskAccess replace exposed RDP access for administrators?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "DeskAccess is designed to let administrators keep RDP private and reachable only through a scoped DeskAccess tunnel. Access is granted to authenticated machines using certificates, with TPM-backed identity where supported."
+          "text": "DeskAccess is designed to let administrators keep RDP private and reachable only through a scoped DeskAccess tunnel. Access is granted to authenticated machine identities, with TPM-backed identity keys where supported."
         }
       }
     ]
@@ -261,7 +261,7 @@
     <main>
       <section class="hero" aria-labelledby="hero-title">
         <h1 id="hero-title">DeskAccess</h1>
-        <p class="lead">TPM-aware, passwordless access control for RDP, SSH, VNC, and selected TCP services. Keep RDP private, then allow access only from authenticated machines using certificates and optional TPM-backed hardware identity.</p>
+        <p class="lead">TPM-aware, passwordless access control for RDP, SSH, VNC, and selected TCP services. Keep RDP private, then allow access only from authenticated machine identities with optional TPM-backed identity keys.</p>
         <div class="actions">
           <a class="button" href="https://github.com/winnie264/deskaccess/releases">Download releases</a>
           <a class="button secondary" href="https://github.com/winnie264/deskaccess">View source</a>
@@ -299,12 +299,12 @@
             <p>Use DeskAccess as the controlled access path to RDP instead of opening port 3389 to a LAN, VPN subnet, or the public internet.</p>
           </article>
           <article class="item">
-            <h3>TPM-backed device trust</h3>
-            <p>Where TPM support is available, trusted access can be tied to hardware-backed key material so only the paired machine identity can reconnect.</p>
+            <h3>TPM-backed identity keys</h3>
+            <p>Where TPM support is available, trusted access can require proof from hardware-backed key material so only the paired machine identity can reconnect.</p>
           </article>
           <article class="item">
-            <h3>Certificate-based access</h3>
-            <p>Pairing and reconnects use machine certificates at the DeskAccess layer, reducing dependence on shared remote-access passwords.</p>
+            <h3>Machine identity access</h3>
+            <p>Pairing and reconnects use machine identity proofs at the DeskAccess layer, reducing dependence on shared remote-access passwords.</p>
           </article>
         </div>
       </section>
@@ -331,7 +331,7 @@
 
       <section id="security" aria-labelledby="security-title">
         <h2 id="security-title">Security Model</h2>
-        <p class="lead">DeskAccess uses passwordless authentication at the DeskAccess layer. During pairing and reconnect, endpoints prove machine identity with certificates instead of relying on a shared DeskAccess password.</p>
+        <p class="lead">DeskAccess uses passwordless authentication at the DeskAccess layer. During pairing and reconnect, endpoints prove machine identity instead of relying on a shared DeskAccess password.</p>
         <div class="grid">
           <article class="item">
             <h3>Encrypted transport</h3>
@@ -342,16 +342,16 @@
             <p>RDP can remain reachable only locally on the host while DeskAccess handles the authenticated remote access path.</p>
           </article>
           <article class="item">
-            <h3>TPM-backed certificates</h3>
-            <p>Where supported, DeskAccess can bind machine identity to TPM-backed key material so trusted access is tied to the hardware device.</p>
+            <h3>TPM-backed identity</h3>
+            <p>Where supported, DeskAccess can bind machine identity to TPM-backed key material. This is used as a hardware-backed identity key, not as full TPM manufacturer-chain attestation or device-health verification.</p>
           </article>
           <article class="item">
             <h3>Passwordless pairing</h3>
-            <p>Pairing links establish trust between machines. Later connections authenticate with certificates, not a DeskAccess account password.</p>
+            <p>Pairing links establish trust between machines. Later connections authenticate with machine identity proofs, not a DeskAccess account password.</p>
           </article>
           <article class="item">
             <h3>Software fallback</h3>
-            <p>On systems without TPM support, DeskAccess can fall back to software identity while keeping the same certificate-based authentication model.</p>
+            <p>On systems without TPM support, DeskAccess can fall back to software identity while keeping the same machine-identity authentication model.</p>
           </article>
           <article class="item">
             <h3>Relay-safe design</h3>

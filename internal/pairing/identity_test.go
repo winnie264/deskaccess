@@ -130,16 +130,15 @@ func TestIdentityProofUsesDeskAccessNodeIDNotIrohTransportPeer(t *testing.T) {
 	transportPeer := "abdb7df6403a"
 	window := rendezvous.TimeWindow(time.Now())
 	msg := identityProofMessage("request", nodeID.String(), hostID, nil, nil, nil, "pairing", window)
-	sig, err := id.SignProof(msg)
-	if err != nil {
-		t.Fatalf("sign proof: %v", err)
-	}
 	proof := &protocol.IdentityProof{
-		Backend:    string(identity.BackendSoftware),
-		MachineID:  id.MachineID(),
-		PublicKey:  id.PublicKeyRaw(),
-		TimeWindow: window,
-		Signature:  sig,
+		Backend:       string(identity.BackendSoftware),
+		MachineID:     id.MachineID(),
+		PublicKey:     id.PublicKeyRaw(),
+		NodePublicKey: id.PublicKeyRaw(),
+		TimeWindow:    window,
+	}
+	if err := signTestIdentityProof(id, key, msg, proof); err != nil {
+		t.Fatalf("sign proof: %v", err)
 	}
 
 	if err := verifyIdentityProof(proof, nil, "request", nodeID.String(), hostID, nil, nil, nil, "pairing"); err != nil {
@@ -148,4 +147,65 @@ func TestIdentityProofUsesDeskAccessNodeIDNotIrohTransportPeer(t *testing.T) {
 	if err := verifyIdentityProof(proof, nil, "request", transportPeer, hostID, nil, nil, nil, "pairing"); err == nil {
 		t.Fatal("verify unexpectedly succeeded with iroh transport peer id")
 	}
+}
+
+func TestIdentityProofRejectsClaimedNodeIDFromDifferentKey(t *testing.T) {
+	_, victimPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate victim key: %v", err)
+	}
+	victimKey, err := libp2pcrypto.UnmarshalEd25519PrivateKey(victimPriv)
+	if err != nil {
+		t.Fatalf("unmarshal victim key: %v", err)
+	}
+	victimID, err := peer.IDFromPrivateKey(victimKey)
+	if err != nil {
+		t.Fatalf("victim peer id: %v", err)
+	}
+
+	_, attackerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate attacker key: %v", err)
+	}
+	attackerKey, err := libp2pcrypto.UnmarshalEd25519PrivateKey(attackerPriv)
+	if err != nil {
+		t.Fatalf("unmarshal attacker key: %v", err)
+	}
+	attackerIdentity := &identity.Identity{PrivKey: attackerKey, Backend: identity.BackendSoftware}
+
+	hostID := "12D3KooWHostNode"
+	window := rendezvous.TimeWindow(time.Now())
+	msg := identityProofMessage("request", victimID.String(), hostID, nil, nil, nil, "trusted", window)
+	attackerPub, err := attackerKey.GetPublic().Raw()
+	if err != nil {
+		t.Fatalf("attacker public key: %v", err)
+	}
+	proof := &protocol.IdentityProof{
+		Backend:       string(identity.BackendSoftware),
+		MachineID:     attackerIdentity.MachineID(),
+		PublicKey:     attackerIdentity.PublicKeyRaw(),
+		NodePublicKey: attackerPub,
+		TimeWindow:    window,
+	}
+	if err := signTestIdentityProof(attackerIdentity, attackerKey, msg, proof); err != nil {
+		t.Fatalf("sign proof: %v", err)
+	}
+
+	if err := verifyIdentityProof(proof, nil, "request", victimID.String(), hostID, nil, nil, nil, "trusted"); err == nil {
+		t.Fatal("verify accepted attacker key claiming victim node id")
+	}
+}
+
+func signTestIdentityProof(id *identity.Identity, nodeKey libp2pcrypto.PrivKey, proofMessage []byte, proof *protocol.IdentityProof) error {
+	sig, err := id.SignProof(proofMessage)
+	if err != nil {
+		return err
+	}
+	proof.Signature = sig
+	nodeSig, err := nodeKey.Sign(identityBindingMessage(proofMessage, proof))
+	if err != nil {
+		return err
+	}
+	proof.NodeSignature = nodeSig
+	return nil
 }

@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 )
 
@@ -53,10 +54,15 @@ const (
 const MaxFrameSize = 256 * 1024
 
 // SessionTokenTTL is how long a session token remains valid after issue.
-// A paired local proxy can stay connected until the user disconnects, and RDP
-// clients may be launched later against that same proxy. Keep the token long
-// enough for an interactive work session while still requiring reauth later.
-const SessionTokenTTL = 12 * time.Hour
+// It only needs to bridge the pairing response to app TCP streams opened by
+// the local proxy. RDP can open more than one TCP connection, so the token is
+// short-lived and use-limited rather than single-use.
+const SessionTokenTTL = 2 * time.Minute
+
+// SessionTokenMaxUses bounds how many app TCP streams one authenticated
+// pairing/reauth response can open. This keeps RDP's multi-connection behavior
+// working without leaving a long-lived reusable capability behind.
+const SessionTokenMaxUses = 16
 
 // --- Handshake payloads ---
 
@@ -74,11 +80,13 @@ type TPMAttestation struct {
 // machine identity. TPM proofs sign with the AK private key; software fallback
 // proofs sign with the software identity key.
 type IdentityProof struct {
-	Backend    string `json:"backend"`              // "tpm" | "software"
-	MachineID  string `json:"machine_id"`           // AK/SPKI thumbprint or software pubkey thumbprint
-	PublicKey  []byte `json:"public_key,omitempty"` // software fallback public key
-	TimeWindow int64  `json:"time_window"`          // freshness window
-	Signature  []byte `json:"signature"`            // signature over the pairing transcript
+	Backend       string `json:"backend"`              // "tpm" | "software"
+	MachineID     string `json:"machine_id"`           // AK/SPKI thumbprint or software pubkey thumbprint
+	PublicKey     []byte `json:"public_key,omitempty"` // software fallback public key
+	NodePublicKey []byte `json:"node_public_key"`      // DeskAccess node public key; derives NodeID
+	NodeSignature []byte `json:"node_signature"`       // node-key signature binding NodeID to this proof
+	TimeWindow    int64  `json:"time_window"`          // freshness window
+	Signature     []byte `json:"signature"`            // signature over the pairing transcript
 }
 
 // PairRequest is sent by the client on the pairing stream.
@@ -217,14 +225,15 @@ type SessionGrant struct {
 
 // SessionStore issues and verifies short-lived session tokens.
 // Tokens bridge the gap between the pairing handshake and the tunnel open.
-// Not safe for concurrent use — callers must hold a lock.
 type SessionStore struct {
+	mu     sync.Mutex
 	tokens map[string]sessionEntry
 }
 
 type sessionEntry struct {
 	expiresAt time.Time
 	grant     SessionGrant
+	usesLeft  int
 }
 
 func NewSessionStore() *SessionStore {
@@ -238,12 +247,15 @@ func (s *SessionStore) Issue(peerID string, targetPort int) ([]byte, error) {
 	if _, err := rand.Read(token); err != nil {
 		return nil, fmt.Errorf("generate session token: %w", err)
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.tokens[string(token)] = sessionEntry{
 		expiresAt: time.Now().Add(SessionTokenTTL),
 		grant: SessionGrant{
 			PeerID:     peerID,
 			TargetPort: targetPort,
 		},
+		usesLeft: SessionTokenMaxUses,
 	}
 	s.sweep()
 	return token, nil
@@ -260,6 +272,8 @@ func (s *SessionStore) Verify(token []byte) (peerID string, err error) {
 
 // VerifyGrant checks the token and returns the full capability it represents.
 func (s *SessionStore) VerifyGrant(token []byte) (SessionGrant, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	key := string(token)
 	e, ok := s.tokens[key]
 	if !ok {
@@ -268,6 +282,16 @@ func (s *SessionStore) VerifyGrant(token []byte) (SessionGrant, error) {
 	if time.Now().After(e.expiresAt) {
 		delete(s.tokens, key)
 		return SessionGrant{}, fmt.Errorf("session token expired (must open tunnel within %s)", SessionTokenTTL)
+	}
+	if e.usesLeft <= 0 {
+		delete(s.tokens, key)
+		return SessionGrant{}, fmt.Errorf("session token use limit exceeded")
+	}
+	e.usesLeft--
+	if e.usesLeft <= 0 {
+		delete(s.tokens, key)
+	} else {
+		s.tokens[key] = e
 	}
 	return e.grant, nil
 }

@@ -547,15 +547,30 @@ func (b *Backend) openStream(ctx context.Context, kind string, ticket string) (i
 }
 
 func IsTicket(ticket string) bool {
+	_, err := TicketEndpointID(ticket)
+	return err == nil
+}
+
+func TicketEndpointID(ticket string) (string, error) {
 	ticket = strings.TrimSpace(ticket)
-	if strings.HasPrefix(ticket, TicketPrefix) {
-		return true
+	encoded, ok := strings.CutPrefix(ticket, TicketPrefix)
+	if !ok {
+		return "", ErrIncompatibleTicket
 	}
-	data, err := base64.RawURLEncoding.DecodeString(ticket)
+	data, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
-		return false
+		return "", fmt.Errorf("decode iroh sidecar ticket: %w", err)
 	}
-	return len(bytes.TrimSpace(data)) > 0 && bytes.TrimSpace(data)[0] == '{'
+	var parsed struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return "", fmt.Errorf("parse iroh sidecar ticket: %w", err)
+	}
+	if strings.TrimSpace(parsed.ID) == "" {
+		return "", fmt.Errorf("iroh sidecar ticket missing endpoint id")
+	}
+	return strings.TrimSpace(parsed.ID), nil
 }
 
 func (b *Backend) CloseTunnel(peerID string, reason string) int {

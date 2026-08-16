@@ -66,7 +66,7 @@ type invite struct {
 
 // active returns true if the invite can still be presented to a connecting peer.
 func (inv *invite) active() bool {
-	if inv.Revoked || inv.Used {
+	if inv.Revoked || (inv.Mode == "onetime" && inv.Used) {
 		return false
 	}
 	// far-future sentinel = no expiry
@@ -812,7 +812,7 @@ func (m *Manager) handleIncomingConn(s io.ReadWriteCloser, remotePeerID string, 
 		inv.UsedAt = time.Now()
 		m.mu.Unlock()
 
-		if req.Mode == "pairing" || req.Mode == "onetime" {
+		if req.Mode == "pairing" {
 			now := time.Now()
 			m.cfg.AddTrustedPeer(config.TrustedPeer{
 				NodeID:            requestPeerID,
@@ -940,7 +940,7 @@ func (m *Manager) verifyAndConsume(inviteID []byte, proof []byte, remotePeerID s
 		log.Warn("security audit: invite validation rejected", append(auditArgs, "reason", "revoked")...)
 		return nil, fmt.Errorf("link has been revoked")
 	}
-	if inv.Used {
+	if inv.Mode == "onetime" && inv.Used {
 		log.Warn("security audit: invite validation rejected",
 			append(auditArgs,
 				"reason", "already_used",
@@ -965,12 +965,14 @@ func (m *Manager) verifyAndConsume(inviteID []byte, proof []byte, remotePeerID s
 		return nil, fmt.Errorf("invalid invite proof")
 	}
 
-	inv.Used = true
+	if inv.Mode == "onetime" {
+		inv.Used = true
+	}
 	inv.UsedAt = time.Now()
 	log.Info("security audit: invite validation accepted",
 		append(auditArgs,
 			"proof", "hmac_window_match",
-			"marked_used", true)...)
+			"marked_used", inv.Used)...)
 	return inv, nil
 }
 
@@ -1817,15 +1819,15 @@ func validateInviteFormatVersion(rawURL string) error {
 }
 
 func validateIrohTicket(ticket string, publicKey []byte) error {
-	if !irohsidecar.IsTicket(ticket) {
-		return fmt.Errorf("invalid iroh sidecar ticket")
+	if _, err := irohsidecar.TicketEndpointID(ticket); err != nil {
+		return fmt.Errorf("invalid iroh sidecar ticket: %w", err)
 	}
 	return nil
 }
 
 func validateIrohTicketPeer(ticket string, peerID string) error {
-	if !irohsidecar.IsTicket(ticket) {
-		return fmt.Errorf("invalid iroh sidecar ticket")
+	if _, err := irohsidecar.TicketEndpointID(ticket); err != nil {
+		return fmt.Errorf("invalid iroh sidecar ticket: %w", err)
 	}
 	return nil
 }
@@ -1856,10 +1858,18 @@ func (m *Manager) localProof(role string, signerPeer string, verifierPeer string
 	if id == nil {
 		return nil, fmt.Errorf("identity unavailable")
 	}
+	nodeKey, nodePublicKey, nodePeerID, err := m.localNodeKey()
+	if err != nil {
+		return nil, err
+	}
+	if signerPeer != nodePeerID {
+		return nil, fmt.Errorf("identity proof signer %s does not match local node id %s", shortPeer(signerPeer), shortPeer(nodePeerID))
+	}
 	proof := &protocol.IdentityProof{
-		Backend:    string(id.Backend),
-		MachineID:  id.MachineID(),
-		TimeWindow: window,
+		Backend:       string(id.Backend),
+		MachineID:     id.MachineID(),
+		NodePublicKey: nodePublicKey,
+		TimeWindow:    window,
 	}
 	if proof.Backend == "" {
 		proof.Backend = string(identity.BackendSoftware)
@@ -1876,7 +1886,33 @@ func (m *Manager) localProof(role string, signerPeer string, verifierPeer string
 		return nil, err
 	}
 	proof.Signature = sig
+	nodeSig, err := nodeKey.Sign(identityBindingMessage(msg, proof))
+	if err != nil {
+		return nil, fmt.Errorf("sign node identity binding: %w", err)
+	}
+	proof.NodeSignature = nodeSig
 	return proof, nil
+}
+
+func (m *Manager) localNodeKey() (libp2pcrypto.PrivKey, []byte, string, error) {
+	priv, err := m.cfg.PrivateKeyBytes()
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("load node private key: %w", err)
+	}
+	key, err := libp2pcrypto.UnmarshalEd25519PrivateKey(priv)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("decode node private key: %w", err)
+	}
+	pub := key.GetPublic()
+	raw, err := pub.Raw()
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("read node public key: %w", err)
+	}
+	nodeID, err := peer.IDFromPublicKey(pub)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("derive node id: %w", err)
+	}
+	return key, raw, nodeID.String(), nil
 }
 
 func (m *Manager) localProofIdentity() *identity.Identity {
@@ -1913,6 +1949,9 @@ func verifyIdentityProof(proof *protocol.IdentityProof, att *protocol.TPMAttesta
 		return fmt.Errorf("identity proof expired")
 	}
 	msg := identityProofMessage(role, signerPeer, verifierPeer, inviteID, inviteProof, sessionToken, mode, proof.TimeWindow)
+	if err := verifyNodeIdentityBinding(proof, signerPeer, msg); err != nil {
+		return err
+	}
 	switch proof.Backend {
 	case string(identity.BackendTPM):
 		return identity.VerifyTPMProof(attestationBundle(att), proof.MachineID, msg, proof.Signature)
@@ -1921,6 +1960,34 @@ func verifyIdentityProof(proof *protocol.IdentityProof, att *protocol.TPMAttesta
 	default:
 		return fmt.Errorf("unsupported identity proof backend %q", proof.Backend)
 	}
+}
+
+func verifyNodeIdentityBinding(proof *protocol.IdentityProof, signerPeer string, proofMessage []byte) error {
+	if len(proof.NodePublicKey) == 0 {
+		return fmt.Errorf("missing node public key binding")
+	}
+	if len(proof.NodeSignature) == 0 {
+		return fmt.Errorf("missing node identity binding signature")
+	}
+	nodePub, err := libp2pcrypto.UnmarshalEd25519PublicKey(proof.NodePublicKey)
+	if err != nil {
+		return fmt.Errorf("decode node public key: %w", err)
+	}
+	nodeID, err := peer.IDFromPublicKey(nodePub)
+	if err != nil {
+		return fmt.Errorf("derive node id from identity binding: %w", err)
+	}
+	if nodeID.String() != signerPeer {
+		return fmt.Errorf("identity proof signer does not match node public key")
+	}
+	ok, err := nodePub.Verify(identityBindingMessage(proofMessage, proof), proof.NodeSignature)
+	if err != nil {
+		return fmt.Errorf("verify node identity binding: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("node identity binding signature invalid")
+	}
+	return nil
 }
 
 func verifyStoredIdentity(storedPublicKey string, storedMachineID string, proof *protocol.IdentityProof) error {
@@ -2001,6 +2068,29 @@ func identityProofMessage(role string, signerPeer string, verifierPeer string, i
 	var win [8]byte
 	binary.BigEndian.PutUint64(win[:], uint64(window))
 	out = append(out, win[:]...)
+	return out
+}
+
+func identityBindingMessage(proofMessage []byte, proof *protocol.IdentityProof) []byte {
+	var out []byte
+	appendString := func(s string) {
+		var lenBuf [4]byte
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(s)))
+		out = append(out, lenBuf[:]...)
+		out = append(out, s...)
+	}
+	appendBytes := func(b []byte) {
+		var lenBuf [4]byte
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(b)))
+		out = append(out, lenBuf[:]...)
+		out = append(out, b...)
+	}
+	appendString("DeskAccess node identity binding v1")
+	appendBytes(proofMessage)
+	appendString(proof.Backend)
+	appendString(proof.MachineID)
+	appendBytes(proof.PublicKey)
+	appendBytes(proof.Signature)
 	return out
 }
 

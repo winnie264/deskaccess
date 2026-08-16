@@ -2,8 +2,8 @@
 // tray process. The transport is platform-specific:
 //   - Windows: named pipe  \\.\pipe\DeskAccess
 //     Security descriptor grants access to SYSTEM + Administrators +
-//     Interactive Users (any currently logged-in user). The OS enforces this —
-//     no application-level secret is needed.
+//     Interactive Users (any currently logged-in user). The server then verifies
+//     the connecting process path before accepting commands.
 //   - Linux/other: Unix socket in $XDG_RUNTIME_DIR with mode 0600.
 //     The kernel enforces owner-only access.
 //
@@ -69,6 +69,10 @@ func Serve(ctx context.Context, h Handler) error {
 
 func serveConn(conn net.Conn, h Handler) {
 	defer conn.Close()
+	if err := authorizeClient(conn); err != nil {
+		_ = json.NewEncoder(conn).Encode(Response{Error: "unauthorized IPC client: " + err.Error()})
+		return
+	}
 	var req Request
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {
 		return

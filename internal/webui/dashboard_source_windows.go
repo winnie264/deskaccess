@@ -156,10 +156,7 @@ func processPathMatchesDeskAccess(pid uint32) bool {
 		return false
 	}
 	clean := strings.ToLower(filepath.Clean(path))
-	if currentExecutableCleanPathForWebUI != "" && clean == currentExecutableCleanPathForWebUI {
-		return true
-	}
-	return strings.ToLower(filepath.Base(clean)) == currentExecutableNameForWebUI
+	return currentExecutableCleanPathForWebUI != "" && clean == currentExecutableCleanPathForWebUI
 }
 
 func processImagePath(pid uint32) (string, error) {

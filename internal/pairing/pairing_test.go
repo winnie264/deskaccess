@@ -45,11 +45,25 @@ func newTestConfig(t *testing.T, label string) *config.Config {
 	}
 }
 
-func newLibp2pHost(t *testing.T) host.Host {
+func newLibp2pHost(t *testing.T, cfgs ...*config.Config) host.Host {
 	t.Helper()
-	h, err := libp2p.New(
+	opts := []libp2p.Option{
 		libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"),
 		libp2p.DisableRelay(),
+	}
+	if len(cfgs) > 0 && cfgs[0] != nil {
+		privBytes, err := cfgs[0].PrivateKeyBytes()
+		if err != nil {
+			t.Fatalf("priv key bytes: %v", err)
+		}
+		key, err := libp2pcrypto.UnmarshalEd25519PrivateKey(privBytes)
+		if err != nil {
+			t.Fatalf("unmarshal key: %v", err)
+		}
+		opts = append(opts, libp2p.Identity(key))
+	}
+	h, err := libp2p.New(
+		opts...,
 	)
 	if err != nil {
 		t.Fatalf("create libp2p host: %v", err)
@@ -76,7 +90,7 @@ func newTestNode(t *testing.T, h host.Host, cfg *config.Config) *node.Node {
 
 func newManager(t *testing.T, cfg *config.Config) *pairing.Manager {
 	t.Helper()
-	h := newLibp2pHost(t)
+	h := newLibp2pHost(t, cfg)
 	n := newTestNode(t, h, cfg)
 	return pairing.New(n, cfg)
 }
@@ -342,7 +356,7 @@ func TestVerify_OneTimeUseEnforced(t *testing.T) {
 	}
 }
 
-func TestVerify_PairingUseEnforced(t *testing.T) {
+func TestVerify_PairingInviteReusableUntilRevoked(t *testing.T) {
 	cfg := newTestConfig(t, "host")
 	mgr := newManager(t, cfg)
 
@@ -355,11 +369,11 @@ func TestVerify_PairingUseEnforced(t *testing.T) {
 	if err := mgr.TestVerifyAndConsume(tok, "client-peer"); err != nil {
 		t.Fatalf("first verify: %v", err)
 	}
-	if err := mgr.TestVerifyAndConsume(tok, "client-peer"); err == nil {
-		t.Error("second use of same pairing invite should be rejected")
+	if err := mgr.TestVerifyAndConsume(tok, "client-peer"); err != nil {
+		t.Fatalf("second use of same pairing invite should be accepted: %v", err)
 	}
-	if err := mgr.TestVerifyAndConsume(tok, "other-peer"); err == nil {
-		t.Error("another machine should not be able to reuse pairing invite")
+	if err := mgr.TestVerifyAndConsume(tok, "other-peer"); err != nil {
+		t.Fatalf("another machine should be able to use active pairing invite: %v", err)
 	}
 }
 
@@ -500,7 +514,7 @@ func TestLibp2pDHTInviteDoesNotFallbackToOtherBackends(t *testing.T) {
 	cfg.BTDHT.Mode = "disabled"
 	cfg.Relay.Mode = "disabled"
 	cfg.NormalizeNetworkBackend()
-	n := newTestNode(t, newLibp2pHost(t), cfg)
+	n := newTestNode(t, newLibp2pHost(t, cfg), cfg)
 
 	backend := netbackend.NewLibp2p(n)
 	_, err := backend.OpenPairingSession(context.Background(), netbackend.PairingTarget{
@@ -528,13 +542,13 @@ func TestFullPairingFlow(t *testing.T) {
 
 	// ── host setup ──────────────────────────────────────────────────────────
 	hostCfg := newTestConfig(t, "home-pc")
-	hostH := newLibp2pHost(t)
+	hostH := newLibp2pHost(t, hostCfg)
 	hostN := node.NewFromHost(hostH, hostCfg)
 	hostMgr := pairing.New(hostN, hostCfg)
 
 	// ── admin/client setup ──────────────────────────────────────────────────
 	adminCfg := newTestConfig(t, "admin-laptop")
-	adminH := newLibp2pHost(t)
+	adminH := newLibp2pHost(t, adminCfg)
 	adminN := node.NewFromHost(adminH, adminCfg)
 	adminMgr := pairing.New(adminN, adminCfg)
 
@@ -592,13 +606,13 @@ func TestFullPairingFlow(t *testing.T) {
 		t.Errorf("trusted label: want 'admin-laptop', got %q", hostCfg.Trusted[0].Label)
 	}
 
-	// Invite should be marked used with the admin's label
+	// Pairing invite should remain active, while recording the last paired label.
 	invites := hostMgr.ListInvites()
 	if len(invites) != 1 {
 		t.Fatalf("invites: want 1, got %d", len(invites))
 	}
-	if invites[0].Status != "used" {
-		t.Errorf("invite status: want used, got %s", invites[0].Status)
+	if invites[0].Status != "pending" {
+		t.Errorf("invite status: want pending, got %s", invites[0].Status)
 	}
 	if invites[0].UsedBy != "admin-laptop" {
 		t.Errorf("used_by: want 'admin-laptop', got %s", invites[0].UsedBy)
@@ -617,15 +631,15 @@ func TestFullPairingFlow_ReplayPrevented(t *testing.T) {
 	defer cancel()
 
 	hostCfg := newTestConfig(t, "host")
-	hostH := newLibp2pHost(t)
+	hostH := newLibp2pHost(t, hostCfg)
 	hostMgr := pairing.New(node.NewFromHost(hostH, hostCfg), hostCfg)
 
 	admin1Cfg := newTestConfig(t, "admin1")
-	admin1H := newLibp2pHost(t)
+	admin1H := newLibp2pHost(t, admin1Cfg)
 	admin1Mgr := pairing.New(node.NewFromHost(admin1H, admin1Cfg), admin1Cfg)
 
 	admin2Cfg := newTestConfig(t, "admin2")
-	admin2H := newLibp2pHost(t)
+	admin2H := newLibp2pHost(t, admin2Cfg)
 	admin2Mgr := pairing.New(node.NewFromHost(admin2H, admin2Cfg), admin2Cfg)
 
 	hostInfo := peer.AddrInfo{ID: hostH.ID(), Addrs: hostH.Addrs()}
@@ -652,15 +666,15 @@ func TestFullPairingFlow_ReplayPrevented(t *testing.T) {
 	} else {
 		t.Logf("✓ Replay correctly rejected: %v", err)
 	}
-	if !hostCfg.IsTrusted(admin1H.ID().String()) {
-		t.Fatal("first one-time invite user should be added to host allowed list")
+	if hostCfg.IsTrusted(admin1H.ID().String()) {
+		t.Fatal("one-time invite user should not be added to host allowed list")
 	}
 	if hostCfg.IsTrusted(admin2H.ID().String()) {
 		t.Fatal("rejected one-time invite user should not be added to host allowed list")
 	}
 }
 
-func TestPairingInviteReuseRejectedButTrustedReauthWorks(t *testing.T) {
+func TestPairingInviteReusableAndTrustedReauthWorks(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test — skipped in short mode")
 	}
@@ -669,11 +683,11 @@ func TestPairingInviteReuseRejectedButTrustedReauthWorks(t *testing.T) {
 	defer cancel()
 
 	hostCfg := newTestConfig(t, "host")
-	hostH := newLibp2pHost(t)
+	hostH := newLibp2pHost(t, hostCfg)
 	hostMgr := pairing.New(node.NewFromHost(hostH, hostCfg), hostCfg)
 
 	adminCfg := newTestConfig(t, "admin")
-	adminH := newLibp2pHost(t)
+	adminH := newLibp2pHost(t, adminCfg)
 	adminMgr := pairing.New(node.NewFromHost(adminH, adminCfg), adminCfg)
 
 	hostInfo := peer.AddrInfo{ID: hostH.ID(), Addrs: hostH.Addrs()}
@@ -697,8 +711,8 @@ func TestPairingInviteReuseRejectedButTrustedReauthWorks(t *testing.T) {
 	if first.Protocol != "vnc" || first.TargetPort != 5901 {
 		t.Fatalf("first target = %s/%d, want vnc/5901", first.Protocol, first.TargetPort)
 	}
-	if _, err := adminMgr.ConnectByURL(ctx, url); err == nil {
-		t.Fatalf("same trusted peer should not be able to reuse pairing URL")
+	if _, err := adminMgr.ConnectByURL(ctx, url); err != nil {
+		t.Fatalf("same trusted peer should be able to reuse active pairing URL: %v", err)
 	}
 	paired, err := adminMgr.ReauthPaired(ctx, hostH.ID().String())
 	if err != nil {
